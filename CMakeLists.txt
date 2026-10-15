@@ -29,7 +29,10 @@ include(ExternalProject)
 
 include_directories(${CMAKE_BINARY_DIR}/dist/include ${CMAKE_BINARY_DIR}/dist/include/cjson)
 
-link_directories(${CMAKE_BINARY_DIR}/dist/lib)
+link_directories(
+  ${CMAKE_BINARY_DIR}/dist/lib
+  ${CMAKE_BINARY_DIR}/dist/lib64
+)
 
 set(DEP_LIBS "srtp2" "usrsctp" "mbedtls" "mbedcrypto" "mbedx509" "cjson")
 # Extended debug information (symbols, source code, and macro definitions)
@@ -71,6 +74,7 @@ endif()
 ExternalProject_Add(cjson
   SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cJSON
   CMAKE_ARGS
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5
     -DCMAKE_C_FLAGS="-fPIC"
     -DBUILD_SHARED_LIBS=off
     -DENABLE_CJSON_TEST=off
@@ -103,7 +107,9 @@ ExternalProject_Add(srtp2
 ExternalProject_Add(usrsctp
   SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/usrsctp
   CMAKE_ARGS
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5
     -DCMAKE_C_FLAGS="-fPIC"
+    -Dsctp_werror=off
     -Dsctp_build_programs=off
     -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}/dist
     -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
