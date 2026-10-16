@@ -13,11 +13,15 @@
 #include "sctp.h"
 #include "sdp.h"
 
-#define STATE_CHANGED(pc, curr_state)                                 \
-  if (pc->oniceconnectionstatechange && pc->state != curr_state) {    \
-    pc->oniceconnectionstatechange(curr_state, pc->config.user_data); \
-    pc->state = curr_state;                                           \
-  }
+#define STATE_CHANGED(pc, curr_state)                                   \
+  do {                                                                 \
+    if ((pc)->state != (curr_state)) {                                  \
+      (pc)->state = (curr_state);                                       \
+      if ((pc)->oniceconnectionstatechange) {                           \
+        (pc)->oniceconnectionstatechange((curr_state), (pc)->config.user_data); \
+      }                                                                \
+    }                                                                  \
+  } while (0)
 
 struct PeerConnection {
   PeerConfiguration config;
@@ -46,6 +50,8 @@ struct PeerConnection {
 
   uint32_t remote_assrc;
   uint32_t remote_vssrc;
+  SdpMedia remote_media[2];
+  int remote_media_count;
 };
 
 static void peer_connection_outgoing_rtp_packet(uint8_t* data, size_t size, void* user_data) {
@@ -198,7 +204,7 @@ void peer_connection_destroy(PeerConnection* pc) {
 }
 
 void peer_connection_close(PeerConnection* pc) {
-  pc->state = PEER_CONNECTION_CLOSED;
+  STATE_CHANGED(pc, PEER_CONNECTION_CLOSED);
 }
 
 int peer_connection_send_audio(PeerConnection* pc, const uint8_t* buf, size_t len) {
@@ -340,7 +346,17 @@ int peer_connection_loop(PeerConnection* pc) {
           dtls_srtp_decrypt_rtp_packet(&pc->dtls_srtp, pc->agent_buf, &pc->agent_ret);
 
           ssrc = rtp_get_ssrc(pc->agent_buf);
-          if (ssrc == pc->remote_assrc) {
+          uint8_t pt = pc->agent_buf[1] & 0x7f;
+          if (pc->remote_media_count > 0) {
+            /* Demux only the negotiated primary PTs, never RTX or another codec. */
+            for (int i = 0; i < pc->remote_media_count; i++) {
+              if (pt == pc->remote_media[i].payload_type) {
+                RtpDecoder* decoder = pc->remote_media[i].video ? &pc->vrtp_decoder : &pc->artp_decoder;
+                rtp_decoder_decode(decoder, pc->agent_buf, pc->agent_ret);
+                break;
+              }
+            }
+          } else if (ssrc == pc->remote_assrc) {
             rtp_decoder_decode(&pc->artp_decoder, pc->agent_buf, pc->agent_ret);
           } else if (ssrc == pc->remote_vssrc) {
             rtp_decoder_decode(&pc->vrtp_decoder, pc->agent_buf, pc->agent_ret);
@@ -395,16 +411,38 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
   int is_update = 0;
   Agent* agent = &pc->agent;
 
+  if (type == SDP_TYPE_OFFER && !pc->config.datachannel &&
+      (pc->config.video_codec == CODEC_NONE || pc->config.video_codec == CODEC_H264) &&
+      (pc->config.audio_codec == CODEC_NONE || pc->config.audio_codec == CODEC_PCMU)) {
+    pc->remote_media_count = sdp_parse_media(sdp, pc->remote_media,
+                                            pc->config.video_codec, pc->config.audio_codec);
+    if (pc->remote_media_count < 0) {
+      STATE_CHANGED(pc, PEER_CONNECTION_FAILED);
+      return;
+    }
+    for (int i = 0; i < pc->remote_media_count; i++) {
+      if (pc->remote_media[i].video) pc->vrtp_encoder.type = pc->remote_media[i].payload_type;
+      else pc->artp_encoder.type = pc->remote_media[i].payload_type;
+    }
+  }
+  if (!sdp) {
+    STATE_CHANGED(pc, PEER_CONNECTION_FAILED);
+    return;
+  }
+
   while ((line = strstr(start, "\r\n"))) {
-    line = strstr(start, "\r\n");
-    strncpy(buf, start, line - start);
+    if ((size_t)(line - start) >= sizeof(buf)) {
+      STATE_CHANGED(pc, PEER_CONNECTION_FAILED);
+      return;
+    }
+    memcpy(buf, start, line - start);
     buf[line - start] = '\0';
 
     if (strstr(buf, "a=setup:passive")) {
       role = DTLS_SRTP_ROLE_CLIENT;
     }
 
-    if (strstr(buf, "a=fingerprint")) {
+    if (strncmp(buf, "a=fingerprint:sha-256 ", 22) == 0) {
       const char* fingerprint = buf + 22;
       size_t fingerprint_len = strlen(fingerprint);
 
@@ -487,12 +525,33 @@ void peer_connection_set_local_description(PeerConnection* pc, const char* sdp, 
       agent_gather_candidate(&pc->agent, pc->config.ice_servers[i].urls, pc->config.ice_servers[i].username, pc->config.ice_servers[i].credential);
     }
   }
+  agent_update_candidate_pairs(&pc->agent);
 }
 
 static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_type) {
   char* description = (char*)pc->temp_buf;
   memset(pc->temp_buf, 0, sizeof(pc->temp_buf));
   memset(pc->sdp, 0, sizeof(pc->sdp));
+  if (sdp_type == SDP_TYPE_ANSWER && pc->remote_media_count > 0) {
+    sdp_create(pc->sdp, 0, 0, 0);
+    /* Replace the legacy fixed BUNDLE mids, retaining the session header. */
+    char* bundle = strstr(pc->sdp, "a=group:BUNDLE");
+    *bundle = '\0';
+    sdp_append(pc->sdp, "a=group:BUNDLE %s%s%s", pc->remote_media[0].mid,
+               pc->remote_media_count == 2 ? " " : "",
+               pc->remote_media_count == 2 ? pc->remote_media[1].mid : "");
+    agent_get_local_description(&pc->agent, description, sizeof(pc->temp_buf));
+    for (int i = 0; i < pc->remote_media_count; i++) {
+      sdp_append_media(pc->sdp, &pc->remote_media[i]);
+      sdp_append(pc->sdp, "a=ice-ufrag:%s", pc->agent.local_ufrag);
+      sdp_append(pc->sdp, "a=ice-pwd:%s", pc->agent.local_upwd);
+      sdp_append(pc->sdp, "a=fingerprint:sha-256 %s", pc->dtls_srtp.local_fingerprint);
+      sdp_append(pc->sdp, "%s", peer_connection_dtls_role_setup_value(pc->role));
+      if (i == 0) sdp_append(pc->sdp, "%s", description);
+    }
+    if (pc->onicecandidate) pc->onicecandidate(pc->sdp, pc->config.user_data);
+    return pc->sdp;
+  }
   // TODO: check if we have video or audio codecs
   int sdp_audio = (pc->config.audio_codec != CODEC_NONE) && (sdp_type == SDP_TYPE_OFFER || pc->remote_assrc > 0);
   int sdp_video = (pc->config.video_codec != CODEC_NONE) && (sdp_type == SDP_TYPE_OFFER || pc->remote_vssrc > 0);
@@ -549,7 +608,9 @@ const char* peer_connection_create_offer(PeerConnection* pc) {
 }
 
 const char* peer_connection_create_answer(PeerConnection* pc) {
+  if (pc->state == PEER_CONNECTION_FAILED) return NULL;
   peer_connection_set_local_description(pc, NULL, SDP_TYPE_ANSWER);
+  if (pc->state == PEER_CONNECTION_FAILED) return NULL;
   return peer_connection_create_sdp(pc, SDP_TYPE_ANSWER);
 }
 

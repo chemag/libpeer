@@ -3,6 +3,18 @@
 
 #include <string.h>
 #include "config.h"
+#include "peer_connection.h"
+
+/* Bounded, one-track-per-kind H264/PCMU browser-offerer profile. */
+typedef struct SdpMedia {
+  int video;
+  int payload_type;
+  char mid[32];
+  char direction[12];
+} SdpMedia;
+
+int sdp_parse_media(const char* sdp, SdpMedia media[2], MediaCodec video, MediaCodec audio);
+void sdp_append_media(char* sdp, const SdpMedia* media);
 
 #define SDP_ATTR_LENGTH 128
 
