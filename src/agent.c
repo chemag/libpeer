@@ -136,6 +136,7 @@ static int agent_create_host_addr(Agent* agent) {
 
   for (i = 0; i < sizeof(addr_type) / sizeof(addr_type[0]); i++) {
     for (j = 0; j < sizeof(iface_prefx) / sizeof(iface_prefx[0]); j++) {
+      if (agent->local_candidates_count < 0 || agent->local_candidates_count >= AGENT_MAX_CANDIDATES) return -1;
       ice_candidate = agent->local_candidates + agent->local_candidates_count;
       // only copy port and family to addr of ice candidate
       ice_candidate_create(ice_candidate, agent->local_candidates_count, ICE_CANDIDATE_TYPE_HOST,
@@ -150,7 +151,38 @@ static int agent_create_host_addr(Agent* agent) {
   return 0;
 }
 
+/* Preflight the fixed-size parser input and its copied attribute destinations. */
+static int agent_stun_packet_fits(const uint8_t* buf, size_t size) {
+  if (size < sizeof(StunHeader) || size > STUN_ATTR_BUF_SIZE) return 0;
+  size_t body = (size_t)buf[2] << 8 | buf[3];
+  if (body != size - sizeof(StunHeader) || (body & 3)) return 0;
+  for (size_t pos = sizeof(StunHeader); pos < size;) {
+    if (size - pos < 4) return 0;
+    unsigned type = (unsigned)buf[pos] << 8 | buf[pos + 1];
+    size_t length = (size_t)buf[pos + 2] << 8 | buf[pos + 3];
+    size_t padded = (length + 3) & ~(size_t)3;
+    if (padded > size - pos - 4) return 0;
+    switch (type) {
+      case STUN_ATTR_TYPE_USERNAME: if (length >= sizeof(((StunMessage*)0)->username)) return 0; break;
+      case STUN_ATTR_TYPE_REALM: if (length >= sizeof(((StunMessage*)0)->realm)) return 0; break;
+      case STUN_ATTR_TYPE_NONCE: if (length >= sizeof(((StunMessage*)0)->nonce)) return 0; break;
+      case STUN_ATTR_TYPE_MESSAGE_INTEGRITY: if (length != 20) return 0; break;
+      case STUN_ATTR_TYPE_FINGERPRINT: if (length != 4) return 0; break;
+      case STUN_ATTR_TYPE_MAPPED_ADDRESS:
+      case STUN_ATTR_TYPE_XOR_MAPPED_ADDRESS:
+      case STUN_ATTR_TYPE_XOR_RELAYED_ADDRESS:
+        if (length < 8 || (buf[pos + 5] != STUN_FAMILY_IPV4 && buf[pos + 5] != STUN_FAMILY_IPV6) ||
+            (buf[pos + 5] == STUN_FAMILY_IPV6 && length < 20)) return 0;
+        break;
+      default: break;
+    }
+    pos += 4 + padded;
+  }
+  return 1;
+}
+
 static int agent_create_stun_addr(Agent* agent, Address* serv_addr) {
+  if (agent->local_candidates_count < 0 || agent->local_candidates_count >= AGENT_MAX_CANDIDATES) return -1;
   int ret = -1;
   Address bind_addr;
   StunMessage send_msg;
@@ -173,6 +205,8 @@ static int agent_create_stun_addr(Agent* agent, Address* serv_addr) {
     return ret;
   }
 
+  if (!agent_stun_packet_fits(recv_msg.buf, ret)) return -1;
+  recv_msg.size = ret;
   stun_parse_msg_buf(&recv_msg);
   memcpy(&bind_addr, &recv_msg.mapped_addr, sizeof(Address));
   IceCandidate* ice_candidate = agent->local_candidates + agent->local_candidates_count;
@@ -181,6 +215,7 @@ static int agent_create_stun_addr(Agent* agent, Address* serv_addr) {
 }
 
 static int agent_create_turn_addr(Agent* agent, Address* serv_addr, const char* username, const char* credential) {
+  if (agent->local_candidates_count < 0 || agent->local_candidates_count >= AGENT_MAX_CANDIDATES) return -1;
   int ret = -1;
   uint32_t attr = ntohl(0x11000000);
   Address turn_addr;
@@ -204,6 +239,8 @@ static int agent_create_turn_addr(Agent* agent, Address* serv_addr, const char* 
     return ret;
   }
 
+  if (!agent_stun_packet_fits(recv_msg.buf, ret)) return -1;
+  recv_msg.size = ret;
   stun_parse_msg_buf(&recv_msg);
 
   if (recv_msg.stunclass == STUN_CLASS_ERROR && recv_msg.stunmethod == STUN_METHOD_ALLOCATE) {
@@ -225,12 +262,14 @@ static int agent_create_turn_addr(Agent* agent, Address* serv_addr, const char* 
     return -1;
   }
 
-  agent_socket_recv_attempts(agent, NULL, recv_msg.buf, sizeof(recv_msg.buf), AGENT_STUN_RECV_MAXTIMES);
+  ret = agent_socket_recv_attempts(agent, NULL, recv_msg.buf, sizeof(recv_msg.buf), AGENT_STUN_RECV_MAXTIMES);
   if (ret <= 0) {
     LOGD("Failed to receive TURN Binding Response.");
     return ret;
   }
 
+  if (!agent_stun_packet_fits(recv_msg.buf, ret)) return -1;
+  recv_msg.size = ret;
   stun_parse_msg_buf(&recv_msg);
   memcpy(&turn_addr, &recv_msg.relayed_addr, sizeof(Address));
   IceCandidate* ice_candidate = agent->local_candidates + agent->local_candidates_count++;
@@ -239,6 +278,7 @@ static int agent_create_turn_addr(Agent* agent, Address* serv_addr, const char* 
 }
 
 void agent_gather_candidate(Agent* agent, const char* urls, const char* username, const char* credential) {
+  if (agent->local_candidates_count < 0 || agent->local_candidates_count >= AGENT_MAX_CANDIDATES) return;
   char* pos;
   int port;
   char hostname[64];
@@ -400,7 +440,9 @@ int agent_recv(Agent* agent, uint8_t* buf, int len) {
   int ret = -1;
   StunMessage stun_msg;
   Address addr;
-  if ((ret = agent_socket_recv(agent, &addr, buf, len)) > 0 && stun_probe(buf, len) == 0) {
+  if ((ret = agent_socket_recv(agent, &addr, buf, len)) > 0 && stun_probe(buf, ret) == 0) {
+    if (!agent_stun_packet_fits(buf, ret)) return 0;
+    memset(&stun_msg, 0, sizeof(stun_msg));
     memcpy(stun_msg.buf, buf, ret);
     stun_msg.size = ret;
     stun_parse_msg_buf(&stun_msg);
@@ -421,14 +463,26 @@ int agent_recv(Agent* agent, uint8_t* buf, int len) {
   return ret;
 }
 
+/* Shared capacity gate; raw trickle insertion keeps its non-deduplicating semantics. */
+int agent_add_remote_candidate(Agent* agent, char* description, char* end, int deduplicate) {
+  if (agent->remote_candidates_count < 0 || agent->remote_candidates_count >= AGENT_MAX_CANDIDATES) return -1;
+  IceCandidate candidate;
+  if (ice_candidate_from_description(&candidate, description, end) != 0) return -1;
+  if (deduplicate) {
+    for (int i = 0; i < agent->remote_candidates_count; i++) {
+      if (strcmp(agent->remote_candidates[i].foundation, candidate.foundation) == 0) return 0;
+    }
+  }
+  agent->remote_candidates[agent->remote_candidates_count++] = candidate;
+  return 0;
+}
+
 void agent_set_remote_description(Agent* agent, char* description) {
   /*
   a=ice-ufrag:Iexb
   a=ice-pwd:IexbSoY7JulyMbjKwISsG9
   a=candidate:1 1 UDP 1 36.231.28.50 38143 typ srflx
   */
-  int i;
-
   LOGD("Set remote description:\n%s", description);
 
   char* line_start = description;
@@ -442,16 +496,7 @@ void agent_set_remote_description(Agent* agent, char* description) {
       strncpy(agent->remote_upwd, line_start + strlen("a=ice-pwd:"), line_end - line_start - strlen("a=ice-pwd:"));
 
     } else if (strncmp(line_start, "a=candidate:", strlen("a=candidate:")) == 0) {
-      if (ice_candidate_from_description(&agent->remote_candidates[agent->remote_candidates_count], line_start, line_end) == 0) {
-        for (i = 0; i < agent->remote_candidates_count; i++) {
-          if (strcmp(agent->remote_candidates[i].foundation, agent->remote_candidates[agent->remote_candidates_count].foundation) == 0) {
-            break;
-          }
-        }
-        if (i == agent->remote_candidates_count) {
-          agent->remote_candidates_count++;
-        }
-      }
+      agent_add_remote_candidate(agent, line_start, line_end, 1);
     }
 
     line_start = line_end + 2;
@@ -471,6 +516,7 @@ void agent_update_candidate_pairs(Agent* agent) {
   for (i = 0; i < agent->local_candidates_count; i++) {
     for (j = 0; j < agent->remote_candidates_count; j++) {
       if (agent->local_candidates[i].addr.family == agent->remote_candidates[j].addr.family) {
+        if (agent->candidate_pairs_num >= AGENT_MAX_CANDIDATE_PAIRS) return;
         agent->candidate_pairs[agent->candidate_pairs_num].local = &agent->local_candidates[i];
         agent->candidate_pairs[agent->candidate_pairs_num].remote = &agent->remote_candidates[j];
         agent->candidate_pairs[agent->candidate_pairs_num].priority = agent->local_candidates[i].priority + agent->remote_candidates[j].priority;

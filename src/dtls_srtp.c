@@ -318,6 +318,8 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
       MBEDTLS_TLS_SRTP_AES128_CM_HMAC_SHA1_80,
       MBEDTLS_TLS_SRTP_UNSET};
 
+  /* Init accepts fresh storage; callers must deinit before reinitializing a live session. */
+  memset(dtls_srtp, 0, sizeof(*dtls_srtp));
   dtls_srtp->role = role;
   dtls_srtp->state = DTLS_SRTP_STATE_INIT;
   dtls_srtp->user_data = user_data;
@@ -334,7 +336,9 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
   mbedtls_pk_init(&dtls_srtp->pkey);
   mbedtls_entropy_init(&dtls_srtp->entropy);
   mbedtls_ctr_drbg_init(&dtls_srtp->ctr_drbg);
+  mbedtls_ssl_cookie_init(&dtls_srtp->cookie_ctx);
   dtls_srtp->initialized = 1;
+  if (role != DTLS_SRTP_ROLE_CLIENT && role != DTLS_SRTP_ROLE_SERVER) return -1;
 
 #if MBEDTLS_VERSION_NUMBER >= 0x04000000
   if (psa_crypto_init() != PSA_SUCCESS) {
@@ -353,7 +357,6 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
       return -1;
     }
 
-    mbedtls_ssl_cookie_init(&dtls_srtp->cookie_ctx);
 #if MBEDTLS_VERSION_NUMBER >= 0x04000000
     ret = mbedtls_ssl_cookie_setup(&dtls_srtp->cookie_ctx);
 #else

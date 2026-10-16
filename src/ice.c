@@ -1,3 +1,5 @@
+#include <ctype.h>
+#include <errno.h>
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -77,57 +79,64 @@ void ice_candidate_to_description(IceCandidate* candidate, char* description, in
            typ_raddr);
 }
 
+static int ice_read_token(char** input, char* output, size_t capacity) {
+  char* p = *input;
+  while (isspace((unsigned char)*p)) p++;
+  char* end = p;
+  while (*end && !isspace((unsigned char)*end)) end++;
+  size_t length = end - p;
+  if (!length || length >= capacity) return -1;
+  memcpy(output, p, length);
+  output[length] = '\0';
+  *input = end;
+  return 0;
+}
+
+static int ice_read_number(const char* text, uint32_t maximum, uint32_t* number) {
+  char* end;
+  if (!isdigit((unsigned char)*text)) return -1;
+  errno = 0;
+  unsigned long value = strtoul(text, &end, 10);
+  if (errno || *end || value > maximum) return -1;
+  *number = (uint32_t)value;
+  return 0;
+}
+
 int ice_candidate_from_description(IceCandidate* candidate, char* description, char* end) {
-  char* candidate_start = description;
-  uint32_t port;
-  char type[16];
-  char addrstring[ADDRSTRLEN];
-
-  if (strncmp("a=", candidate_start, strlen("a=")) == 0) {
-    candidate_start += strlen("a=");
-  }
-  candidate_start += strlen("candidate:");
-
-  // a=candidate:448736988 1 udp 2122260223 172.17.0.1 49250 typ host generation 0 network-id 1 network-cost 50
-  // a=candidate:udpcandidate 1 udp 120 192.168.1.102 8000 typ host
-  if (sscanf(candidate_start, "%s %d %s %" PRIu32 " %s %" PRIu32 " typ %s",
-             candidate->foundation,
-             &candidate->component,
-             candidate->transport,
-             &candidate->priority,
-             addrstring,
-             &port,
-             type) != 7) {
-    LOGE("Failed to parse ICE candidate description");
-    return -1;
-  }
-
-  if (strncmp(candidate->transport, "UDP", 3) != 0 && strncmp(candidate->transport, "udp", 3) != 0) {
-    LOGE("Only UDP transport is supported");
-    return -1;
-  }
-
-  if (strncmp(type, "host", 4) == 0) {
-    candidate->type = ICE_CANDIDATE_TYPE_HOST;
-  } else if (strncmp(type, "srflx", 5) == 0) {
-    candidate->type = ICE_CANDIDATE_TYPE_SRFLX;
-  } else if (strncmp(type, "relay", 5) == 0) {
-    candidate->type = ICE_CANDIDATE_TYPE_RELAY;
-  } else {
-    LOGE("Unknown candidate type: %s", type);
-    return -1;
-  }
-
-  addr_set_port(&candidate->addr, port);
-
+  char line[512], component[12], priority[12], port_text[12], typ[4];
+  char type[16], addrstring[ADDRSTRLEN];
+  uint32_t port, component_number;
+  IceCandidate parsed = {0};
+  if (!candidate || !description || !end || end <= description ||
+      (size_t)(end - description) >= sizeof(line) || memchr(description, '\0', end - description)) return -1;
+  memcpy(line, description, end - description);
+  line[end - description] = '\0';
+  char* candidate_start = line;
+  if (strncmp(candidate_start, "a=", 2) == 0) candidate_start += 2;
+  if (strncmp(candidate_start, "candidate:", 10) != 0) return -1;
+  candidate_start += 10;
+  /* Bound every token independently; parsing never reads beyond the supplied line. */
+  if (ice_read_token(&candidate_start, parsed.foundation, sizeof(parsed.foundation)) ||
+      ice_read_token(&candidate_start, component, sizeof(component)) ||
+      ice_read_token(&candidate_start, parsed.transport, sizeof(parsed.transport)) ||
+      ice_read_token(&candidate_start, priority, sizeof(priority)) ||
+      ice_read_token(&candidate_start, addrstring, sizeof(addrstring)) ||
+      ice_read_token(&candidate_start, port_text, sizeof(port_text)) ||
+      ice_read_token(&candidate_start, typ, sizeof(typ)) ||
+      ice_read_token(&candidate_start, type, sizeof(type)) || strcmp(typ, "typ") ||
+      ice_read_number(component, 256, &component_number) || !component_number ||
+      ice_read_number(priority, UINT32_MAX, &parsed.priority) ||
+      ice_read_number(port_text, UINT16_MAX, &port) || !port) return -1;
+  parsed.component = (int)component_number;
+  if (strcmp(parsed.transport, "UDP") != 0 && strcmp(parsed.transport, "udp") != 0) return -1;
+  if (strcmp(type, "host") == 0) parsed.type = ICE_CANDIDATE_TYPE_HOST;
+  else if (strcmp(type, "srflx") == 0) parsed.type = ICE_CANDIDATE_TYPE_SRFLX;
+  else if (strcmp(type, "relay") == 0) parsed.type = ICE_CANDIDATE_TYPE_RELAY;
+  else return -1;
+  addr_set_port(&parsed.addr, (uint16_t)port);
   if (strstr(addrstring, "local") != NULL) {
-    if (mdns_resolve_addr(addrstring, &candidate->addr) == 0) {
-      LOGW("Failed to resolve mDNS address");
-      return -1;
-    }
-  } else if (addr_from_string(addrstring, &candidate->addr) == 0) {
-    return -1;
-  }
-
+    if (mdns_resolve_addr(addrstring, &parsed.addr) == 0) return -1;
+  } else if (addr_from_string(addrstring, &parsed.addr) == 0) return -1;
+  *candidate = parsed;
   return 0;
 }
