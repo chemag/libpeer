@@ -13,14 +13,18 @@ static void on_state(PeerConnectionState state, void* unused) {
 }
 
 static const char offer[] =
-    "v=0\r\na=group:BUNDLE 0\r\n"
+    "v=0\r\na=group:BUNDLE 0 1\r\n"
     "m=audio 9 UDP/TLS/RTP/SAVPF 0\r\n"
-    "a=mid:0\r\na=recvonly\r\na=rtcp-mux\r\n"
-    "a=ice-ufrag:test\r\na=ice-pwd:abcdefghijklmnopqrstuvwx\r\n";
+    "a=mid:0\r\na=sendrecv\r\na=rtcp-mux\r\na=rtpmap:0 PCMU/8000\r\n"
+    "a=ice-ufrag:test\r\na=ice-pwd:abcdefghijklmnopqrstuvwx\r\n"
+    "m=video 9 UDP/TLS/RTP/SAVPF 125\r\na=mid:1\r\na=sendrecv\r\na=rtcp-mux\r\n"
+    "a=rtpmap:125 H264/90000\r\na=fmtp:125 packetization-mode=1;profile-level-id=42e01f\r\n"
+    "a=rtcp-fb:125 nack pli\r\n";
 
 int main(void) {
   PeerConfiguration config = {0};
   config.audio_codec = CODEC_PCMU;
+  config.video_codec = CODEC_H264;
   peer = peer_connection_create(&config);
   assert(peer);
   peer_connection_set_remote_description(peer, offer, SDP_TYPE_OFFER);
@@ -37,8 +41,12 @@ int main(void) {
   peer_connection_destroy(peer);
   peer = peer_connection_create(&config);
   peer_connection_set_remote_description(peer, "m=audio", SDP_TYPE_OFFER);
+#if CONFIG_STRICT_CHROME_PROFILE
   assert(peer_connection_get_state(peer) == PEER_CONNECTION_FAILED);
   assert(peer_connection_create_answer(peer) == NULL);
+#else
+  assert(peer_connection_get_state(peer) == PEER_CONNECTION_CHECKING); /* Legacy parsing retained. */
+#endif
   peer_connection_destroy(peer);
 
   assert(srtp_init() == srtp_err_status_ok);

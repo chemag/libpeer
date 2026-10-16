@@ -138,17 +138,18 @@ static int sdp_has_parameter(const char* fmtp, const char* parameter) {
 }
 
 int sdp_parse_media(const char* sdp, SdpMedia media[2], MediaCodec video, MediaCodec audio) {
-  uint8_t offered[2][128] = {{0}}, mapped[2][128] = {{0}}, compatible[2][128] = {{0}};
+  uint8_t offered[2][128] = {{0}}, mapped[2][128] = {{0}}, compatible[2][128] = {{0}}, pli[2][128] = {{0}};
   int mux[2] = {0}, count = 0, seen_audio = 0, seen_video = 0;
   char line[256], bundle[80] = "";
   memset(media, 0, 2 * sizeof(*media));
-  if (!sdp || strlen(sdp) >= CONFIG_SDP_BUFFER_SIZE) return -1;
+  if (video != CODEC_H264 || audio != CODEC_PCMU || !sdp || strlen(sdp) >= CONFIG_SDP_BUFFER_SIZE) return -1;
   while (*sdp) {
     const char* end = strstr(sdp, "\r\n");
     if (!end || (size_t)(end - sdp) >= sizeof(line)) return -1;
     memcpy(line, sdp, end - sdp);
     line[end - sdp] = '\0';
     sdp = end + 2;
+    if (strcmp(line, "a=sendonly") == 0 || strcmp(line, "a=recvonly") == 0 || strcmp(line, "a=inactive") == 0) return -1;
     if (strncmp(line, "m=", 2) == 0) {
       char kind[16], protocol[32];
       int port, offset = 0;
@@ -181,19 +182,20 @@ int sdp_parse_media(const char* sdp, SdpMedia media[2], MediaCodec video, MediaC
         strcpy(m->mid, line + 6);
       } else if (strcmp(line, "a=rtcp-mux") == 0) {
         mux[count - 1] = 1;
-      } else if (strcmp(line, "a=sendonly") == 0) strcpy(m->direction, "recvonly");
-      else if (strcmp(line, "a=recvonly") == 0) strcpy(m->direction, "sendonly");
-      else if (strcmp(line, "a=inactive") == 0) strcpy(m->direction, "inactive");
-      else if (sscanf(line, "a=rtpmap:%d %63s", &pt, encoding) == 2 && pt >= 0 && pt <= 127) {
+      } else if (sscanf(line, "a=rtpmap:%d %63s", &pt, encoding) == 2 && pt >= 0 && pt <= 127) {
         mapped[count - 1][pt] = m->video ? strcmp(encoding, "H264/90000") == 0 :
             (pt == 0 && (strcmp(encoding, "PCMU/8000") == 0 || strcmp(encoding, "PCMU/8000/1") == 0));
+      } else if (strcmp(line, "a=rtcp-fb:* nack pli") == 0) {
+        memset(pli[count - 1], 1, sizeof(pli[count - 1]));
+      } else if (sscanf(line, "a=rtcp-fb:%d %n", &pt, &offset) == 1 && offset && pt >= 0 && pt <= 127) {
+        if (strcmp(line + offset, "nack pli") == 0) pli[count - 1][pt] = 1;
       } else if (sscanf(line, "a=fmtp:%d %n", &pt, &offset) == 1 && offset && pt >= 0 && pt <= 127) {
         compatible[count - 1][pt] = sdp_has_parameter(line + offset, "packetization-mode=1") &&
             sdp_has_parameter(line + offset, "profile-level-id=42e01f");
       }
     }
   }
-  if (!count) return -1;
+  if (count != 2 || seen_audio != 1 || seen_video != 1) return -1;
   /* This profile has one BUNDLE transport, with no unimplemented m-lines. */
   const char* b = bundle;
   for (int i = 0; i < count; i++) {
@@ -204,7 +206,7 @@ int sdp_parse_media(const char* sdp, SdpMedia media[2], MediaCodec video, MediaC
     if (i && strcmp(media[0].mid, media[i].mid) == 0) return -1;
     media[i].payload_type = -1;
     for (int pt = 0; pt < 128; pt++) {
-      if (offered[i][pt] && (media[i].video ? (mapped[i][pt] && compatible[i][pt]) : pt == 0)) {
+      if (offered[i][pt] && mapped[i][pt] && (media[i].video ? (compatible[i][pt] && pli[i][pt]) : pt == 0)) {
         media[i].payload_type = pt;
         break;
       }

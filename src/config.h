@@ -41,6 +41,11 @@
 #define CONFIG_USE_USRSCTP 1
 #endif
 
+#ifndef CONFIG_STRICT_CHROME_PROFILE
+/* Explicit opt-in: two sendrecv PCMU/H264 tracks, browser is the offerer. */
+#define CONFIG_STRICT_CHROME_PROFILE 0
+#endif
+
 #ifndef CONFIG_SDP_BUFFER_SIZE
 #define CONFIG_SDP_BUFFER_SIZE 8096
 #endif

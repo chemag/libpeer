@@ -419,9 +419,12 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
   int is_update = 0;
   Agent* agent = &pc->agent;
 
-  if (type == SDP_TYPE_OFFER && !pc->config.datachannel &&
-      (pc->config.video_codec == CODEC_NONE || pc->config.video_codec == CODEC_H264) &&
-      (pc->config.audio_codec == CODEC_NONE || pc->config.audio_codec == CODEC_PCMU)) {
+#if CONFIG_STRICT_CHROME_PROFILE
+  if (type == SDP_TYPE_OFFER) {
+    if (pc->config.datachannel || pc->config.video_codec != CODEC_H264 || pc->config.audio_codec != CODEC_PCMU) {
+      STATE_CHANGED(pc, PEER_CONNECTION_FAILED);
+      return;
+    }
     pc->remote_media_count = sdp_parse_media(sdp, pc->remote_media,
                                             pc->config.video_codec, pc->config.audio_codec);
     if (pc->remote_media_count < 0) {
@@ -433,6 +436,7 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
       else pc->artp_encoder.type = pc->remote_media[i].payload_type;
     }
   }
+#endif
   if (!sdp) {
     STATE_CHANGED(pc, PEER_CONNECTION_FAILED);
     return;

@@ -5,7 +5,7 @@
 #include "config.h"
 #include "peer_connection.h"
 
-/* Bounded, one-track-per-kind H264/PCMU browser-offerer profile. */
+/* Strict, two-sendrecv-track H264/PCMU browser-offerer profile. */
 typedef struct SdpMedia {
   int video;
   int payload_type;
