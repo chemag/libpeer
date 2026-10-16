@@ -436,6 +436,34 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
   return 0;
 }
 
+int dtls_srtp_set_role(DtlsSrtp* dtls_srtp, DtlsSrtpRole role) {
+  int ret;
+  if (!dtls_srtp->initialized || dtls_srtp->state != DTLS_SRTP_STATE_INIT ||
+      dtls_srtp->srtp_in || dtls_srtp->srtp_out ||
+      (role != DTLS_SRTP_ROLE_CLIENT && role != DTLS_SRTP_ROLE_SERVER)) return -1;
+  if (dtls_srtp->role == role) return 0;
+
+  /* Rebuild only the SSL endpoint. Regenerating the certificate would invalidate
+   * the fingerprint already sent in the offer. BIO callbacks live in DtlsSrtp. */
+  mbedtls_ssl_free(&dtls_srtp->ssl);
+  mbedtls_ssl_init(&dtls_srtp->ssl);
+  mbedtls_ssl_conf_endpoint(&dtls_srtp->conf,
+                           role == DTLS_SRTP_ROLE_SERVER ? MBEDTLS_SSL_IS_SERVER : MBEDTLS_SSL_IS_CLIENT);
+  dtls_srtp->role = role;
+  if (role == DTLS_SRTP_ROLE_SERVER) {
+    mbedtls_ssl_cookie_free(&dtls_srtp->cookie_ctx);
+    mbedtls_ssl_cookie_init(&dtls_srtp->cookie_ctx);
+#if MBEDTLS_VERSION_NUMBER >= 0x04000000
+    ret = mbedtls_ssl_cookie_setup(&dtls_srtp->cookie_ctx);
+#else
+    ret = mbedtls_ssl_cookie_setup(&dtls_srtp->cookie_ctx, mbedtls_ctr_drbg_random, &dtls_srtp->ctr_drbg);
+#endif
+    if (ret != 0) return ret;
+    mbedtls_ssl_conf_dtls_cookies(&dtls_srtp->conf, mbedtls_ssl_cookie_write, mbedtls_ssl_cookie_check, &dtls_srtp->cookie_ctx);
+  }
+  return mbedtls_ssl_setup(&dtls_srtp->ssl, &dtls_srtp->conf);
+}
+
 void dtls_srtp_deinit(DtlsSrtp* dtls_srtp) {
   if (!dtls_srtp->initialized) {
     return;
@@ -456,9 +484,8 @@ void dtls_srtp_deinit(DtlsSrtp* dtls_srtp) {
   }
 #endif
 
-  if (dtls_srtp->role == DTLS_SRTP_ROLE_SERVER) {
-    mbedtls_ssl_cookie_free(&dtls_srtp->cookie_ctx);
-  }
+  /* An offer may start as server and negotiate client without replacing its cert. */
+  mbedtls_ssl_cookie_free(&dtls_srtp->cookie_ctx);
 
   if (dtls_srtp->srtp_in) {
     srtp_dealloc(dtls_srtp->srtp_in);
@@ -685,6 +712,7 @@ int dtls_srtp_handshake(DtlsSrtp* dtls_srtp, Address* addr, const char* remote_f
     return -1;
   }
 
+  dtls_srtp->state = DTLS_SRTP_STATE_HANDSHAKE;
   if (dtls_srtp->role == DTLS_SRTP_ROLE_SERVER) {
     ret = dtls_srtp_handshake_server(dtls_srtp);
   } else {

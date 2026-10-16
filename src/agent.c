@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -85,6 +86,8 @@ static int agent_socket_recv(Agent* agent, Address* addr, uint8_t* buf, int len)
 
   ret = select(maxfd + 1, &rfds, NULL, NULL, &tv);
   if (ret < 0) {
+    /* Return to the owner loop on signals, including orderly shutdown. */
+    if (errno == EINTR) return 0;
     LOGE("select error");
   } else if (ret == 0) {
     // timeout

@@ -36,7 +36,7 @@ void sdp_append_h264(char* sdp) {
   sdp_append(sdp, "c=IN IP4 0.0.0.0");
   sdp_append(sdp, "a=rtcp-fb:96 nack");
   sdp_append(sdp, "a=rtcp-fb:96 nack pli");
-  sdp_append(sdp, "a=fmtp:96 profile-level-id=42e01f;level-asymmetry-allowed=1");
+  sdp_append(sdp, "a=fmtp:96 packetization-mode=1;profile-level-id=42c01f;level-asymmetry-allowed=1");
   sdp_append(sdp, "a=rtpmap:96 H264/90000");
   sdp_append(sdp, "a=ssrc:1 cname:webrtc-h264");
   sdp_append(sdp, "a=sendrecv");
@@ -67,7 +67,7 @@ void sdp_append_pcma(char* sdp) {
 }
 
 void sdp_append_pcmu(char* sdp) {
-  sdp_append(sdp, "m=audio 9 UDP/TLS/RTP/SAVP 0");
+  sdp_append(sdp, "m=audio 9 UDP/TLS/RTP/SAVPF 0");
   sdp_append(sdp, "c=IN IP4 0.0.0.0");
   sdp_append(sdp, "a=rtpmap:0 PCMU/8000");
   sdp_append(sdp, "a=ssrc:5 cname:webrtc-pcmu");
@@ -137,9 +137,45 @@ static int sdp_has_parameter(const char* fmtp, const char* parameter) {
   return 0;
 }
 
-int sdp_parse_media(const char* sdp, SdpMedia media[2], MediaCodec video, MediaCodec audio) {
+static int sdp_answer_h264_compatible(const char* fmtp) {
+  int mode = 0, profile = 0;
+  while (*fmtp) {
+    while (*fmtp == ' ' || *fmtp == '\t' || *fmtp == ';') fmtp++;
+    const char* end = strchr(fmtp, ';');
+    if (!end) end = fmtp + strlen(fmtp);
+    const char* trim = end;
+    while (trim > fmtp && (trim[-1] == ' ' || trim[-1] == '\t')) trim--;
+    if (strncmp(fmtp, "packetization-mode=", 19) == 0) {
+      if (mode++ || trim - fmtp != 20 || fmtp[19] != '1') return 0;
+    } else if (strncmp(fmtp, "profile-level-id=", 17) == 0) {
+      unsigned value = 0;
+      if (profile++ || trim - fmtp != 23) return 0;
+      for (int i = 17; i < 23; i++) {
+        char c = fmtp[i];
+        unsigned digit;
+        if (c >= '0' && c <= '9') digit = c - '0';
+        else if (c >= 'a' && c <= 'f') digit = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') digit = c - 'A' + 10;
+        else return 0;
+        value = (value << 4) | digit;
+      }
+      unsigned idc = value >> 16, iop = (value >> 8) & 0xff;
+      /* RFC 6184 equivalent constrained-baseline profiles, at offered level 3.1.
+       * The fixed encoder cannot lower its level, nor did we offer a higher one. */
+      if ((value & 0xff) != 0x1f ||
+          !((idc == 0x42 && (iop & 0x4f) == 0x40) ||
+            (idc == 0x4d && (iop & 0x8f) == 0x80) ||
+            (idc == 0x58 && (iop & 0xcf) == 0xc0))) return 0;
+    }
+    fmtp = *end ? end + 1 : end;
+  }
+  return mode == 1 && profile == 1;
+}
+
+static int sdp_parse_media_description(const char* sdp, SdpMedia media[2], MediaCodec video, MediaCodec audio, int answer) {
   uint8_t offered[2][128] = {{0}}, mapped[2][128] = {{0}}, compatible[2][128] = {{0}}, pli[2][128] = {{0}};
   int mux[2] = {0}, count = 0, seen_audio = 0, seen_video = 0;
+  int answer_map[2] = {0}, answer_fmtp[2] = {0};
   char line[256], bundle[80] = "";
   memset(media, 0, 2 * sizeof(*media));
   if (video != CODEC_H264 || audio != CODEC_PCMU || !sdp || strlen(sdp) >= CONFIG_SDP_BUFFER_SIZE) return -1;
@@ -158,16 +194,21 @@ int sdp_parse_media(const char* sdp, SdpMedia media[2], MediaCodec video, MediaC
       SdpMedia* m = &media[count];
       if (strcmp(kind, "video") == 0 && video == CODEC_H264 && !seen_video++) m->video = 1;
       else if (strcmp(kind, "audio") != 0 || audio != CODEC_PCMU || seen_audio++) return -1;
+      if (answer && m->video != (count == 0)) return -1;
       strcpy(m->direction, "sendrecv");
       const char* p = line + offset;
+      int payloads = 0;
       while (*p) {
         char* next;
         long pt = strtol(p, &next, 10);
         if (next == p || pt < 0 || pt > 127 || (*next && *next != ' ')) return -1;
+        if (answer && pt != (m->video ? 96 : 0)) return -1;
         offered[count][pt] = 1;
+        payloads++;
         p = next;
         while (*p == ' ') p++;
       }
+      if (answer && payloads != 1) return -1;
       count++;
     } else if (strncmp(line, "a=group:BUNDLE ", 15) == 0) {
       if (strlen(line + 15) >= sizeof(bundle)) return -1;
@@ -179,10 +220,12 @@ int sdp_parse_media(const char* sdp, SdpMedia media[2], MediaCodec video, MediaC
       if (strncmp(line, "a=mid:", 6) == 0) {
         size_t len = strlen(line + 6);
         if (!len || len >= sizeof(m->mid) || strpbrk(line + 6, " \t")) return -1;
+        if (answer && (m->mid[0] || strcmp(line + 6, m->video ? "1" : "2"))) return -1;
         strcpy(m->mid, line + 6);
       } else if (strcmp(line, "a=rtcp-mux") == 0) {
         mux[count - 1] = 1;
-      } else if (sscanf(line, "a=rtpmap:%d %63s", &pt, encoding) == 2 && pt >= 0 && pt <= 127) {
+      } else if (sscanf(line, "a=rtpmap:%d %63s %n", &pt, encoding, &offset) == 2 && pt >= 0 && pt <= 127) {
+        if (answer && (!offered[count - 1][pt] || answer_map[count - 1]++ || line[offset])) return -1;
         mapped[count - 1][pt] = m->video ? strcmp(encoding, "H264/90000") == 0 :
             (pt == 0 && (strcmp(encoding, "PCMU/8000") == 0 || strcmp(encoding, "PCMU/8000/1") == 0));
       } else if (strcmp(line, "a=rtcp-fb:* nack pli") == 0) {
@@ -190,8 +233,11 @@ int sdp_parse_media(const char* sdp, SdpMedia media[2], MediaCodec video, MediaC
       } else if (sscanf(line, "a=rtcp-fb:%d %n", &pt, &offset) == 1 && offset && pt >= 0 && pt <= 127) {
         if (strcmp(line + offset, "nack pli") == 0) pli[count - 1][pt] = 1;
       } else if (sscanf(line, "a=fmtp:%d %n", &pt, &offset) == 1 && offset && pt >= 0 && pt <= 127) {
-        compatible[count - 1][pt] = sdp_has_parameter(line + offset, "packetization-mode=1") &&
-            sdp_has_parameter(line + offset, "profile-level-id=42e01f");
+        if (answer && (!offered[count - 1][pt] || answer_fmtp[count - 1]++)) return -1;
+        compatible[count - 1][pt] = answer ? sdp_answer_h264_compatible(line + offset) :
+            (sdp_has_parameter(line + offset, "packetization-mode=1") &&
+             (sdp_has_parameter(line + offset, "profile-level-id=42e01f") ||
+              sdp_has_parameter(line + offset, "profile-level-id=42c01f")));
       }
     }
   }
@@ -215,6 +261,14 @@ int sdp_parse_media(const char* sdp, SdpMedia media[2], MediaCodec video, MediaC
   }
   if (*b) return -1;
   return count;
+}
+
+int sdp_parse_media(const char* sdp, SdpMedia media[2], MediaCodec video, MediaCodec audio) {
+  return sdp_parse_media_description(sdp, media, video, audio, 0);
+}
+
+int sdp_parse_answer(const char* sdp, SdpMedia media[2], MediaCodec video, MediaCodec audio) {
+  return sdp_parse_media_description(sdp, media, video, audio, 1);
 }
 
 void sdp_append_media(char* sdp, const SdpMedia* media) {

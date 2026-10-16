@@ -30,6 +30,7 @@ struct PeerConnection {
   DtlsSrtp dtls_srtp;
   Sctp sctp;
   DtlsSrtpRole role;
+  int local_offer;
   char remote_fingerprint[DTLS_SRTP_FINGERPRINT_LENGTH];
 
   char sdp[CONFIG_SDP_BUFFER_SIZE];
@@ -409,6 +410,53 @@ int peer_connection_loop(PeerConnection* pc) {
   return 0;
 }
 
+/* Answers must choose one active/passive DTLS role for our single transport.
+ * Bound every line before the legacy ICE parser copies attribute values. */
+static int peer_connection_answer_role(const char* sdp, DtlsSrtpRole* role) {
+  char buf[256];
+  int session_role = -1, media_role = -1, negotiated_role = -1, media_count = 0;
+  size_t length = 0;
+  while (length < CONFIG_SDP_BUFFER_SIZE && sdp[length]) length++;
+  if (!length || length == CONFIG_SDP_BUFFER_SIZE) return -1;
+
+  while (*sdp) {
+    const char* end = strstr(sdp, "\r\n");
+    if (!end || (size_t)(end - sdp) >= sizeof(buf)) return -1;
+    memcpy(buf, sdp, end - sdp);
+    buf[end - sdp] = '\0';
+    sdp = end + 2;
+    if (strpbrk(buf, "\r\n")) return -1;
+    if (strncmp(buf, "m=", 2) == 0) {
+      if (media_count) {
+        int effective_role = media_role < 0 ? session_role : media_role;
+        if (effective_role < 0 || (negotiated_role >= 0 && negotiated_role != effective_role)) return -1;
+        negotiated_role = effective_role;
+      }
+      media_count++;
+      media_role = -1;
+    } else if (strncmp(buf, "a=setup:", 8) == 0) {
+      int value;
+      if (strcmp(buf + 8, "active") == 0) value = DTLS_SRTP_ROLE_SERVER;
+      else if (strcmp(buf + 8, "passive") == 0) value = DTLS_SRTP_ROLE_CLIENT;
+      else return -1; /* actpass and holdconn are not usable answer roles. */
+      int* target = media_count ? &media_role : &session_role;
+      if (*target >= 0 && *target != value) return -1;
+      *target = value;
+    } else if (strncmp(buf, "a=ice-ufrag:", 12) == 0) {
+      if (strlen(buf + 12) >= sizeof(((Agent*)0)->remote_ufrag)) return -1;
+    } else if (strncmp(buf, "a=ice-pwd:", 10) == 0) {
+      if (strlen(buf + 10) >= sizeof(((Agent*)0)->remote_upwd)) return -1;
+    } else if (strncmp(buf, "a=fingerprint:sha-256 ", 22) == 0) {
+      if (strlen(buf + 22) >= DTLS_SRTP_FINGERPRINT_LENGTH) return -1;
+    }
+  }
+  int effective_role = media_role < 0 ? session_role : media_role;
+  if (!media_count || effective_role < 0 ||
+      (negotiated_role >= 0 && negotiated_role != effective_role)) return -1;
+  *role = (DtlsSrtpRole)effective_role;
+  return 0;
+}
+
 void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp, SdpType type) {
   char* start = (char*)sdp;
   char* line = NULL;
@@ -424,14 +472,21 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
     return;
   }
 
+  if (type == SDP_TYPE_ANSWER &&
+      (!pc->local_offer || peer_connection_answer_role(sdp, &role) != 0)) {
+    STATE_CHANGED(pc, PEER_CONNECTION_FAILED);
+    return;
+  }
+
 #if CONFIG_STRICT_CHROME_PROFILE
-  if (type == SDP_TYPE_OFFER) {
+  if (type == SDP_TYPE_OFFER || type == SDP_TYPE_ANSWER) {
     if (pc->config.datachannel || pc->config.video_codec != CODEC_H264 || pc->config.audio_codec != CODEC_PCMU) {
       STATE_CHANGED(pc, PEER_CONNECTION_FAILED);
       return;
     }
-    pc->remote_media_count = sdp_parse_media(sdp, pc->remote_media,
-                                            pc->config.video_codec, pc->config.audio_codec);
+    pc->remote_media_count = type == SDP_TYPE_ANSWER ?
+        sdp_parse_answer(sdp, pc->remote_media, pc->config.video_codec, pc->config.audio_codec) :
+        sdp_parse_media(sdp, pc->remote_media, pc->config.video_codec, pc->config.audio_codec);
     if (pc->remote_media_count < 0) {
       STATE_CHANGED(pc, PEER_CONNECTION_FAILED);
       return;
@@ -450,10 +505,6 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
     }
     memcpy(buf, start, line - start);
     buf[line - start] = '\0';
-
-    if (strstr(buf, "a=setup:passive")) {
-      role = DTLS_SRTP_ROLE_CLIENT;
-    }
 
     if (strncmp(buf, "a=fingerprint:sha-256 ", 22) == 0) {
       const char* fingerprint = buf + 22;
@@ -488,7 +539,16 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
   }
 
   if (is_update) {
+    if (type == SDP_TYPE_ANSWER && role != pc->role) STATE_CHANGED(pc, PEER_CONNECTION_FAILED);
     return;
+  }
+
+  if (type == SDP_TYPE_ANSWER) {
+    if (dtls_srtp_set_role(&pc->dtls_srtp, role) != 0) {
+      STATE_CHANGED(pc, PEER_CONNECTION_FAILED);
+      return;
+    }
+    pc->role = role;
   }
 
   agent_set_remote_description(&pc->agent, (char*)sdp);
@@ -510,11 +570,18 @@ void peer_connection_set_local_description(PeerConnection* pc, const char* sdp, 
 
   switch (sdp_type) {
     case SDP_TYPE_OFFER:
+      pc->local_offer = 1;
       pc->role = DTLS_SRTP_ROLE_SERVER;
+      pc->remote_media_count = 0;
+      pc->remote_assrc = 0;
+      pc->remote_vssrc = 0;
+      if (pc->config.video_codec == CODEC_H264) pc->vrtp_encoder.type = 96;
+      if (pc->config.audio_codec == CODEC_PCMU) pc->artp_encoder.type = 0;
       agent_clear_candidates(&pc->agent);
       pc->agent.mode = AGENT_MODE_CONTROLLING;
       break;
     case SDP_TYPE_ANSWER:
+      pc->local_offer = 0;
       pc->role = DTLS_SRTP_ROLE_CLIENT;
       pc->agent.mode = AGENT_MODE_CONTROLLED;
       break;
@@ -574,7 +641,8 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
   sdp_append(pc->sdp, "a=ice-ufrag:%s", pc->agent.local_ufrag);
   sdp_append(pc->sdp, "a=ice-pwd:%s", pc->agent.local_upwd);
   sdp_append(pc->sdp, "a=fingerprint:sha-256 %s", pc->dtls_srtp.local_fingerprint);
-  sdp_append(pc->sdp, peer_connection_dtls_role_setup_value(pc->role));
+  sdp_append(pc->sdp, "%s", sdp_type == SDP_TYPE_OFFER ?
+             "a=setup:actpass" : peer_connection_dtls_role_setup_value(pc->role));
 
   if (sdp_video) {
     switch (pc->config.video_codec) {
@@ -616,7 +684,9 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
 }
 
 const char* peer_connection_create_offer(PeerConnection* pc) {
+  if (pc->state == PEER_CONNECTION_FAILED) return NULL;
   peer_connection_set_local_description(pc, NULL, SDP_TYPE_OFFER);
+  if (pc->state == PEER_CONNECTION_FAILED) return NULL;
   return peer_connection_create_sdp(pc, SDP_TYPE_OFFER);
 }
 

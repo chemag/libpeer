@@ -14,6 +14,8 @@ typedef struct SdpMedia {
 } SdpMedia;
 
 int sdp_parse_media(const char* sdp, SdpMedia media[2], MediaCodec video, MediaCodec audio);
+/* Validate the answer to libpeer's fixed video-96/mid-1, audio-0/mid-2 offer. */
+int sdp_parse_answer(const char* sdp, SdpMedia media[2], MediaCodec video, MediaCodec audio);
 void sdp_append_media(char* sdp, const SdpMedia* media);
 
 #define SDP_ATTR_LENGTH 128

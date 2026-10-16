@@ -89,6 +89,9 @@ typedef struct DtlsSrtp {
 
 int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data);
 
+/* Change an offerer's negotiated endpoint before DTLS, retaining its certificate. */
+int dtls_srtp_set_role(DtlsSrtp* dtls_srtp, DtlsSrtpRole role);
+
 void dtls_srtp_deinit(DtlsSrtp* dtls_srtp);
 
 int dtls_srtp_create_cert(DtlsSrtp* dtls_srtp);
