@@ -419,6 +419,11 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
   int is_update = 0;
   Agent* agent = &pc->agent;
 
+  if (!sdp) {
+    STATE_CHANGED(pc, PEER_CONNECTION_FAILED);
+    return;
+  }
+
 #if CONFIG_STRICT_CHROME_PROFILE
   if (type == SDP_TYPE_OFFER) {
     if (pc->config.datachannel || pc->config.video_codec != CODEC_H264 || pc->config.audio_codec != CODEC_PCMU) {
@@ -437,10 +442,6 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
     }
   }
 #endif
-  if (!sdp) {
-    STATE_CHANGED(pc, PEER_CONNECTION_FAILED);
-    return;
-  }
 
   while ((line = strstr(start, "\r\n"))) {
     if ((size_t)(line - start) >= sizeof(buf)) {

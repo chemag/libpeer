@@ -49,6 +49,14 @@ int main(void) {
 #endif
   peer_connection_destroy(peer);
 
+  /* Public API rejects NULL before the strict offer parser is entered. */
+  peer = peer_connection_create(&config);
+  assert(peer);
+  peer_connection_set_remote_description(peer, NULL, SDP_TYPE_OFFER);
+  assert(peer_connection_get_state(peer) == PEER_CONNECTION_FAILED);
+  assert(peer_connection_create_answer(peer) == NULL);
+  peer_connection_destroy(peer);
+
   assert(srtp_init() == srtp_err_status_ok);
   DtlsSrtp dtls = {0};
   uint8_t packet[64] = {0x80, 0, 0, 1, 0, 0, 0, 160, 0, 0, 0, 5, 0xff};
