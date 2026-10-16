@@ -480,7 +480,9 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
 
 #if CONFIG_STRICT_CHROME_PROFILE
   if (type == SDP_TYPE_OFFER || type == SDP_TYPE_ANSWER) {
-    if (pc->config.datachannel || pc->config.video_codec != CODEC_H264 || pc->config.audio_codec != CODEC_PCMU) {
+    if (pc->config.datachannel ||
+        (pc->config.video_codec != CODEC_NONE && pc->config.video_codec != CODEC_H264) ||
+        pc->config.audio_codec != CODEC_PCMU) {
       STATE_CHANGED(pc, PEER_CONNECTION_FAILED);
       return;
     }

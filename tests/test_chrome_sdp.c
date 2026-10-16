@@ -38,7 +38,8 @@ int main(void) {
   mode[strlen("packetization-mode=")] = '0';
   assert(sdp_parse_media(offer, media, CODEC_H264, CODEC_PCMU) < 0);
   snprintf(offer, sizeof(offer), "v=0\r\na=group:BUNDLE 0\r\n%s", audio);
-  assert(sdp_parse_media(offer, media, CODEC_NONE, CODEC_PCMU) < 0);
+  assert(sdp_parse_media(offer, media, CODEC_NONE, CODEC_PCMU) == 1);
+  assert(!media[0].video && media[0].payload_type == 0 && !strcmp(media[0].mid, "0"));
   assert(sdp_parse_media(offer, media, CODEC_H264, CODEC_PCMU) < 0);
   assert(sdp_parse_media(offer, media, CODEC_H264, CODEC_NONE) < 0);
   snprintf(offer, sizeof(offer), "v=0\r\na=group:BUNDLE 0 1\r\n%s%s", audio, video);

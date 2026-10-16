@@ -175,26 +175,30 @@ static int sdp_answer_h264_compatible(const char* fmtp) {
 static int sdp_parse_media_description(const char* sdp, SdpMedia media[2], MediaCodec video, MediaCodec audio, int answer) {
   uint8_t offered[2][128] = {{0}}, mapped[2][128] = {{0}}, compatible[2][128] = {{0}}, pli[2][128] = {{0}};
   int mux[2] = {0}, count = 0, seen_audio = 0, seen_video = 0;
-  int answer_map[2] = {0}, answer_fmtp[2] = {0};
+  int answer_map[2] = {0}, answer_fmtp[2] = {0}, seen_bundle = 0;
+  int expected_video = video == CODEC_H264;
+  int expected_count = expected_video + 1;
   char line[256], bundle[80] = "";
   memset(media, 0, 2 * sizeof(*media));
-  if (video != CODEC_H264 || audio != CODEC_PCMU || !sdp || strlen(sdp) >= CONFIG_SDP_BUFFER_SIZE) return -1;
+  if ((video != CODEC_NONE && video != CODEC_H264) || audio != CODEC_PCMU ||
+      !sdp || strlen(sdp) >= CONFIG_SDP_BUFFER_SIZE) return -1;
   while (*sdp) {
     const char* end = strstr(sdp, "\r\n");
     if (!end || (size_t)(end - sdp) >= sizeof(line)) return -1;
     memcpy(line, sdp, end - sdp);
     line[end - sdp] = '\0';
+    if (strpbrk(line, "\r\n")) return -1;
     sdp = end + 2;
     if (strcmp(line, "a=sendonly") == 0 || strcmp(line, "a=recvonly") == 0 || strcmp(line, "a=inactive") == 0) return -1;
     if (strncmp(line, "m=", 2) == 0) {
       char kind[16], protocol[32];
       int port, offset = 0;
-      if (count == 2 || sscanf(line, "m=%15s %d %31s %n", kind, &port, protocol, &offset) != 3 ||
+      if (count == expected_count || sscanf(line, "m=%15s %d %31s %n", kind, &port, protocol, &offset) != 3 ||
           !offset || port <= 0 || strcmp(protocol, "UDP/TLS/RTP/SAVPF") != 0) return -1;
       SdpMedia* m = &media[count];
       if (strcmp(kind, "video") == 0 && video == CODEC_H264 && !seen_video++) m->video = 1;
       else if (strcmp(kind, "audio") != 0 || audio != CODEC_PCMU || seen_audio++) return -1;
-      if (answer && m->video != (count == 0)) return -1;
+      if (answer && m->video != (expected_video && count == 0)) return -1;
       strcpy(m->direction, "sendrecv");
       const char* p = line + offset;
       int payloads = 0;
@@ -211,7 +215,7 @@ static int sdp_parse_media_description(const char* sdp, SdpMedia media[2], Media
       if (answer && payloads != 1) return -1;
       count++;
     } else if (strncmp(line, "a=group:BUNDLE ", 15) == 0) {
-      if (strlen(line + 15) >= sizeof(bundle)) return -1;
+      if (seen_bundle++ || count || strlen(line + 15) >= sizeof(bundle)) return -1;
       strcpy(bundle, line + 15);
     } else if (count) {
       SdpMedia* m = &media[count - 1];
@@ -219,13 +223,15 @@ static int sdp_parse_media_description(const char* sdp, SdpMedia media[2], Media
       char encoding[64];
       if (strncmp(line, "a=mid:", 6) == 0) {
         size_t len = strlen(line + 6);
-        if (!len || len >= sizeof(m->mid) || strpbrk(line + 6, " \t")) return -1;
-        if (answer && (m->mid[0] || strcmp(line + 6, m->video ? "1" : "2"))) return -1;
+        if (m->mid[0] || !len || len >= sizeof(m->mid) || strpbrk(line + 6, " \t\r\n")) return -1;
+        if (answer && strcmp(line + 6, m->video ? "1" : "2")) return -1;
         strcpy(m->mid, line + 6);
       } else if (strcmp(line, "a=rtcp-mux") == 0) {
         mux[count - 1] = 1;
-      } else if (sscanf(line, "a=rtpmap:%d %63s %n", &pt, encoding, &offset) == 2 && pt >= 0 && pt <= 127) {
-        if (answer && (!offered[count - 1][pt] || answer_map[count - 1]++ || line[offset])) return -1;
+      } else if (strncmp(line, "a=rtpmap:", 9) == 0) {
+        if (sscanf(line, "a=rtpmap:%d %63s %n", &pt, encoding, &offset) != 2 ||
+            pt < 0 || pt > 127 || !offset || line[offset] || !offered[count - 1][pt]) return -1;
+        if (answer && answer_map[count - 1]++) return -1;
         mapped[count - 1][pt] = m->video ? strcmp(encoding, "H264/90000") == 0 :
             (pt == 0 && (strcmp(encoding, "PCMU/8000") == 0 || strcmp(encoding, "PCMU/8000/1") == 0));
       } else if (strcmp(line, "a=rtcp-fb:* nack pli") == 0) {
@@ -241,7 +247,7 @@ static int sdp_parse_media_description(const char* sdp, SdpMedia media[2], Media
       }
     }
   }
-  if (count != 2 || seen_audio != 1 || seen_video != 1) return -1;
+  if (count != expected_count || seen_audio != 1 || seen_video != expected_video) return -1;
   /* This profile has one BUNDLE transport, with no unimplemented m-lines. */
   const char* b = bundle;
   for (int i = 0; i < count; i++) {
