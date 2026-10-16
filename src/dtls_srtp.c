@@ -316,9 +316,6 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
   int ret;
   static const mbedtls_ssl_srtp_profile default_profiles[] = {
       MBEDTLS_TLS_SRTP_AES128_CM_HMAC_SHA1_80,
-      MBEDTLS_TLS_SRTP_AES128_CM_HMAC_SHA1_32,
-      MBEDTLS_TLS_SRTP_NULL_HMAC_SHA1_80,
-      MBEDTLS_TLS_SRTP_NULL_HMAC_SHA1_32,
       MBEDTLS_TLS_SRTP_UNSET};
 
   dtls_srtp->role = role;
@@ -460,9 +457,13 @@ void dtls_srtp_deinit(DtlsSrtp* dtls_srtp) {
     mbedtls_ssl_cookie_free(&dtls_srtp->cookie_ctx);
   }
 
-  if (dtls_srtp->state == DTLS_SRTP_STATE_CONNECTED) {
+  if (dtls_srtp->srtp_in) {
     srtp_dealloc(dtls_srtp->srtp_in);
+    dtls_srtp->srtp_in = NULL;
+  }
+  if (dtls_srtp->srtp_out) {
     srtp_dealloc(dtls_srtp->srtp_out);
+    dtls_srtp->srtp_out = NULL;
   }
 
   dtls_srtp->initialized = 0;
@@ -583,6 +584,9 @@ static void dtls_srtp_key_derivation_cb(void* context,
 
   unsigned char master_secret[48];
   unsigned char randbytes[64];
+#if !CONFIG_MBEDTLS_2_X
+  if (secret_type != MBEDTLS_SSL_KEY_EXPORT_TLS12_MASTER_SECRET || secret_len != sizeof(master_secret)) return;
+#endif
 
   memcpy(randbytes, client_random, 32);
   memcpy(randbytes + 32, server_random, 32);
@@ -705,11 +709,20 @@ int dtls_srtp_handshake(DtlsSrtp* dtls_srtp, Address* addr, const char* remote_f
     return -1;
   }
 
-  dtls_srtp->state = DTLS_SRTP_STATE_CONNECTED;
-
   mbedtls_dtls_srtp_info dtls_srtp_negotiation_result;
   mbedtls_ssl_get_dtls_srtp_negotiation_result(&dtls_srtp->ssl, &dtls_srtp_negotiation_result);
-
+  /* The libsrtp default policies implement exactly this negotiated profile. */
+#if CONFIG_MBEDTLS_2_X
+  mbedtls_ssl_srtp_profile profile = dtls_srtp_negotiation_result.chosen_dtls_srtp_profile;
+#else
+  mbedtls_ssl_srtp_profile profile = dtls_srtp_negotiation_result.MBEDTLS_PRIVATE(chosen_dtls_srtp_profile);
+#endif
+  if (profile != MBEDTLS_TLS_SRTP_AES128_CM_HMAC_SHA1_80 ||
+      !dtls_srtp->srtp_in || !dtls_srtp->srtp_out) {
+    LOGE("DTLS did not establish usable SRTP sessions");
+    return -1;
+  }
+  dtls_srtp->state = DTLS_SRTP_STATE_CONNECTED;
   return ret;
 }
 
@@ -745,15 +758,18 @@ int dtls_srtp_probe(uint8_t* buf) {
   return (buf[0] == 0x17);
 }
 
-void dtls_srtp_decrypt_rtp_packet(DtlsSrtp* dtls_srtp, uint8_t* packet, int* bytes) {
-  srtp_unprotect(dtls_srtp->srtp_in, packet, bytes);
+int dtls_srtp_decrypt_rtp_packet(DtlsSrtp* dtls_srtp, uint8_t* packet, int* bytes) {
+  if (dtls_srtp->state != DTLS_SRTP_STATE_CONNECTED || !dtls_srtp->srtp_in) return -1;
+  return (int)srtp_unprotect(dtls_srtp->srtp_in, packet, bytes);
 }
 
-void dtls_srtp_decrypt_rtcp_packet(DtlsSrtp* dtls_srtp, uint8_t* packet, int* bytes) {
-  srtp_unprotect_rtcp(dtls_srtp->srtp_in, packet, bytes);
+int dtls_srtp_decrypt_rtcp_packet(DtlsSrtp* dtls_srtp, uint8_t* packet, int* bytes) {
+  if (dtls_srtp->state != DTLS_SRTP_STATE_CONNECTED || !dtls_srtp->srtp_in) return -1;
+  return (int)srtp_unprotect_rtcp(dtls_srtp->srtp_in, packet, bytes);
 }
 
 int dtls_srtp_encrypt_rtp_packet(DtlsSrtp* dtls_srtp, uint8_t* packet, int* bytes) {
+  if (dtls_srtp->state != DTLS_SRTP_STATE_CONNECTED || !dtls_srtp->srtp_out) return -1;
   return (int)srtp_protect(dtls_srtp->srtp_out, packet, bytes);
 }
 

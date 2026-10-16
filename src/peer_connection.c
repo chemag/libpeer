@@ -72,8 +72,10 @@ static int peer_connection_dtls_srtp_recv(void* ctx, unsigned char* buf, size_t 
   PeerConnection* pc = (PeerConnection*)dtls_srtp->user_data;
 
   if (pc->agent_ret > 0 && pc->agent_ret <= len) {
-    memcpy(buf, pc->agent_buf, pc->agent_ret);
-    return pc->agent_ret;
+    int received = pc->agent_ret;
+    memcpy(buf, pc->agent_buf, received);
+    pc->agent_ret = 0; /* A datagram must not be replayed to every SSL read. */
+    return received;
   }
 
   while (recv_max < CONFIG_TLS_READ_TIMEOUT && pc->state == PEER_CONNECTION_CHECKING) {
@@ -85,7 +87,7 @@ static int peer_connection_dtls_srtp_recv(void* ctx, unsigned char* buf, size_t 
 
     recv_max++;
   }
-  return ret;
+  return ret > 0 ? ret : MBEDTLS_ERR_SSL_TIMEOUT;
 }
 
 static int peer_connection_dtls_srtp_send(void* ctx, const uint8_t* buf, size_t len) {
@@ -100,8 +102,10 @@ static void peer_connection_incoming_rtcp(PeerConnection* pc, uint8_t* buf, size
   RtcpHeader* rtcp_header;
   size_t pos = 0;
 
-  while (pos < len) {
+  while (len - pos >= sizeof(RtcpHeader)) {
     rtcp_header = (RtcpHeader*)(buf + pos);
+    size_t packet_size = 4 * (size_t)ntohs(rtcp_header->length) + 4;
+    if ((buf[pos] >> 6) != 2 || packet_size > len - pos) return;
 
     switch (rtcp_header->type) {
       case RTCP_RR:
@@ -123,7 +127,7 @@ static void peer_connection_incoming_rtcp(PeerConnection* pc, uint8_t* buf, size
         int fmt = rtcp_header_rc(rtcp_header);
         LOGD("RTCP_PSFB %d", fmt);
         // PLI and FIR
-        if ((fmt == 1 || fmt == 4) && pc->config.on_request_keyframe) {
+        if (packet_size >= 12 && (fmt == 1 || fmt == 4) && pc->config.on_request_keyframe) {
           pc->config.on_request_keyframe(pc->config.user_data);
         }
       }
@@ -306,8 +310,10 @@ int peer_connection_loop(PeerConnection* pc) {
     case PEER_CONNECTION_CHECKING:
       if (pc->agent.selected_pair) {
         // if ice candidate pass the connectivity check, then we can start DTLS-SRTP handshake
-        dtls_srtp_handshake(&pc->dtls_srtp, NULL,
-                            pc->remote_fingerprint);
+        if (dtls_srtp_handshake(&pc->dtls_srtp, NULL, pc->remote_fingerprint) != 0) {
+          STATE_CHANGED(pc, PEER_CONNECTION_FAILED);
+          break;
+        }
       } else {
         agent_connectivity_check(&pc->agent);
       }
@@ -329,8 +335,9 @@ int peer_connection_loop(PeerConnection* pc) {
 
         if (rtcp_probe(pc->agent_buf, pc->agent_ret)) {
           LOGD("Got RTCP packet");
-          dtls_srtp_decrypt_rtcp_packet(&pc->dtls_srtp, pc->agent_buf, &pc->agent_ret);
-          peer_connection_incoming_rtcp(pc, pc->agent_buf, pc->agent_ret);
+          if (dtls_srtp_decrypt_rtcp_packet(&pc->dtls_srtp, pc->agent_buf, &pc->agent_ret) == 0 && pc->agent_ret > 0) {
+            peer_connection_incoming_rtcp(pc, pc->agent_buf, pc->agent_ret);
+          }
 
         } else if (dtls_srtp_probe(pc->agent_buf)) {
           int ret = dtls_srtp_read(&pc->dtls_srtp, pc->temp_buf, sizeof(pc->temp_buf));
@@ -343,7 +350,8 @@ int peer_connection_loop(PeerConnection* pc) {
         } else if (rtp_packet_validate(pc->agent_buf, pc->agent_ret)) {
           LOGD("Got RTP packet");
 
-          dtls_srtp_decrypt_rtp_packet(&pc->dtls_srtp, pc->agent_buf, &pc->agent_ret);
+          if (dtls_srtp_decrypt_rtp_packet(&pc->dtls_srtp, pc->agent_buf, &pc->agent_ret) != 0 ||
+              pc->agent_ret < 12) break;
 
           ssrc = rtp_get_ssrc(pc->agent_buf);
           uint8_t pt = pc->agent_buf[1] & 0x7f;
