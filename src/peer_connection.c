@@ -41,7 +41,8 @@ struct PeerConnection {
   void (*on_receiver_packet_loss)(float fraction_loss, uint32_t total_loss, void* user_data);
 
   uint8_t temp_buf[CONFIG_MTU];
-  uint8_t agent_buf[CONFIG_MTU];
+  /* SRTP authentication/tag overhead is added after RTP packetization. */
+  uint8_t agent_buf[CONFIG_MTU + 128];
   int agent_ret;
 
   RtpEncoder artp_encoder;
