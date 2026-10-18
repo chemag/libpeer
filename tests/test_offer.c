@@ -83,6 +83,9 @@ static void test_offer(void) {
   assert(strstr(offer, "m=audio 9 UDP/TLS/RTP/SAVPF 0\r\n"));
   assert(strstr(offer, "a=fmtp:96 packetization-mode=1;profile-level-id=42c01f;"));
   assert(strstr(offer, "m=video") < strstr(offer, "m=audio"));
+  const char* candidate = strstr(offer, "a=candidate:");
+  assert(candidate && candidate > strstr(offer, "m=video") &&
+         candidate < strstr(offer, "m=audio"));
   SdpMedia media[2];
   assert(sdp_parse_media(offer, media, CODEC_H264, CODEC_PCMU) == 2);
   assert(media[0].video && media[0].payload_type == 96 && !strcmp(media[0].mid, "1"));
