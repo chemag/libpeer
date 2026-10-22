@@ -31,6 +31,47 @@ int rtcp_get_pli(uint8_t* packet, int len, uint32_t sender_ssrc,
   return 12;
 }
 
+int rtcp_get_compound_pli(uint8_t* packet, int len, uint32_t sender_ssrc,
+                          uint32_t media_ssrc, const char* cname) {
+  size_t cname_len;
+  size_t sdes_len;
+  size_t pli_offset;
+  size_t total_len;
+  uint32_t network_sender_ssrc;
+  RtcpHeader* header;
+
+  if (packet == NULL || cname == NULL || sender_ssrc == 0 || media_ssrc == 0)
+    return -1;
+  cname_len = strlen(cname);
+  if (cname_len == 0 || cname_len > 255)
+    return -1;
+  sdes_len = (4U + 4U + 2U + cname_len + 1U + 3U) & ~3U;
+  pli_offset = 8U + sdes_len;
+  total_len = pli_offset + 12U;
+  if (len < 0 || (size_t)len < total_len)
+    return -1;
+
+  memset(packet, 0, total_len);
+  network_sender_ssrc = htonl(sender_ssrc);
+
+  header = (RtcpHeader*)packet;
+  rtcp_header_init(header, RTCP_RR, 0);
+  header->length = htons(1);
+  memcpy(packet + 4, &network_sender_ssrc, sizeof(network_sender_ssrc));
+
+  header = (RtcpHeader*)(packet + 8);
+  rtcp_header_init(header, RTCP_SDES, 1);
+  header->length = htons((sdes_len / 4U) - 1U);
+  memcpy(packet + 12, &network_sender_ssrc, sizeof(network_sender_ssrc));
+  packet[16] = 1;
+  packet[17] = (uint8_t)cname_len;
+  memcpy(packet + 18, cname, cname_len);
+
+  if (rtcp_get_pli(packet + pli_offset, 12, sender_ssrc, media_ssrc) < 0)
+    return -1;
+  return (int)total_len;
+}
+
 int rtcp_get_fir(uint8_t* packet, int len, int* seqnr) {
   if (packet == NULL || len != 20 || seqnr == NULL)
     return -1;

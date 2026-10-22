@@ -716,7 +716,8 @@ int peer_connection_request_keyframe(PeerConnection* pc) {
       pc->remote_vssrc == 0) {
     return -1;
   }
-  bytes = rtcp_get_pli(pli, 12, 1U, pc->remote_vssrc);
+  bytes = rtcp_get_compound_pli(pli, sizeof(pli), 1U, pc->remote_vssrc,
+                                "libpeer");
   if (bytes < 0 ||
       dtls_srtp_encrypt_rtcp_packet(&pc->dtls_srtp, pli, &bytes) != 0) {
     return -1;
