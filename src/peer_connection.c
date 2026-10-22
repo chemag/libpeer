@@ -708,17 +708,20 @@ const char* peer_connection_create_answer(PeerConnection* pc) {
   return peer_connection_create_sdp(pc, SDP_TYPE_ANSWER);
 }
 
-int peer_connection_send_rtcp_pil(PeerConnection* pc, uint32_t ssrc) {
-  int ret = -1;
-  uint8_t plibuf[128];
-  rtcp_get_pli(plibuf, 12, ssrc);
+int peer_connection_request_keyframe(PeerConnection* pc) {
+  uint8_t pli[128];
+  int bytes;
 
-  // TODO: encrypt rtcp packet
-  // guint size = 12;
-  // dtls_transport_encrypt_rctp_packet(pc->dtls_transport, plibuf, &size);
-  // ret = nice_agent_send(pc->nice_agent, pc->stream_id, pc->component_id, size, (gchar*)plibuf);
-
-  return ret;
+  if (pc == NULL || pc->state != PEER_CONNECTION_CONNECTED ||
+      pc->remote_vssrc == 0) {
+    return -1;
+  }
+  bytes = rtcp_get_pli(pli, 12, 1U, pc->remote_vssrc);
+  if (bytes < 0 ||
+      dtls_srtp_encrypt_rtcp_packet(&pc->dtls_srtp, pli, &bytes) != 0) {
+    return -1;
+  }
+  return agent_send(&pc->agent, pli, bytes) == bytes ? 0 : -1;
 }
 
 // callbacks

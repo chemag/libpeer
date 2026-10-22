@@ -114,6 +114,8 @@ int peer_connection_send_audio(PeerConnection* pc, const uint8_t* packet, size_t
 
 int peer_connection_send_video(PeerConnection* pc, const uint8_t* packet, size_t bytes);
 
+int peer_connection_request_keyframe(PeerConnection* pc);
+
 void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp, SdpType sdp_type);
 
 void peer_connection_set_local_description(PeerConnection* pc, const char* sdp, SdpType sdp_type);

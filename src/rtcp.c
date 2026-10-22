@@ -14,15 +14,19 @@ int rtcp_probe(uint8_t* packet, size_t size) {
   return ((type >= 64) && (type < 96));
 }
 
-int rtcp_get_pli(uint8_t* packet, int len, uint32_t ssrc) {
-  if (packet == NULL || len != 12)
+int rtcp_get_pli(uint8_t* packet, int len, uint32_t sender_ssrc,
+                 uint32_t media_ssrc) {
+  if (packet == NULL || len != 12 || sender_ssrc == 0 || media_ssrc == 0)
     return -1;
 
   memset(packet, 0, len);
   RtcpHeader* rtcp_header = (RtcpHeader*)packet;
   rtcp_header_init(rtcp_header, RTCP_PSFB, 1);
   rtcp_header->length = htons((len / 4) - 1);
-  memcpy(packet + 8, &ssrc, 4);
+  sender_ssrc = htonl(sender_ssrc);
+  media_ssrc = htonl(media_ssrc);
+  memcpy(packet + 4, &sender_ssrc, sizeof(sender_ssrc));
+  memcpy(packet + 8, &media_ssrc, sizeof(media_ssrc));
 
   return 12;
 }
