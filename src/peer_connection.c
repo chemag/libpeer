@@ -301,6 +301,19 @@ static char* peer_connection_dtls_role_setup_value(DtlsSrtpRole d) {
   return d == DTLS_SRTP_ROLE_SERVER ? "a=setup:passive" : "a=setup:active";
 }
 
+static void peer_connection_decode_rtp(PeerConnection* pc,
+                                       RtpDecoder* decoder,
+                                       int video) {
+  int result = rtp_decoder_decode(decoder, pc->agent_buf, pc->agent_ret);
+
+  if (result < 0) {
+    LOGW("RTP depacketization failed for %s", video ? "video" : "audio");
+    if (video && peer_connection_request_keyframe(pc) != 0) {
+      LOGW("Failed to request a keyframe after video packet loss");
+    }
+  }
+}
+
 int peer_connection_loop(PeerConnection* pc) {
   uint32_t ssrc = 0;
   memset(pc->agent_buf, 0, sizeof(pc->agent_buf));
@@ -362,14 +375,15 @@ int peer_connection_loop(PeerConnection* pc) {
             for (int i = 0; i < pc->remote_media_count; i++) {
               if (pt == pc->remote_media[i].payload_type) {
                 RtpDecoder* decoder = pc->remote_media[i].video ? &pc->vrtp_decoder : &pc->artp_decoder;
-                rtp_decoder_decode(decoder, pc->agent_buf, pc->agent_ret);
+                peer_connection_decode_rtp(pc, decoder,
+                                           pc->remote_media[i].video);
                 break;
               }
             }
           } else if (ssrc == pc->remote_assrc) {
-            rtp_decoder_decode(&pc->artp_decoder, pc->agent_buf, pc->agent_ret);
+            peer_connection_decode_rtp(pc, &pc->artp_decoder, 0);
           } else if (ssrc == pc->remote_vssrc) {
-            rtp_decoder_decode(&pc->vrtp_decoder, pc->agent_buf, pc->agent_ret);
+            peer_connection_decode_rtp(pc, &pc->vrtp_decoder, 1);
           }
 
         } else {

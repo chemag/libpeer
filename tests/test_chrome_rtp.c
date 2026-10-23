@@ -47,10 +47,13 @@ int main(void) {
   packet[24] = 0x65; packet[25] = 0xab;
   assert(rtp_decoder_decode(&decoder, packet, 26) == 0);
   assert(received_size == 6 && received[3] == 1 && received[4] == 0x65 && received[5] == 0xab);
+  packet[3] = 1;
   packet[24] = 28;
   assert(rtp_decoder_decode(&decoder, packet, 25) < 0);
-  packet[25] = 5; /* continuation without start */
-  assert(rtp_decoder_decode(&decoder, packet, 26) < 0);
+  assert(decoder.h264_waiting_for_idr == 1);
+  packet[3] = 2;
+  packet[25] = 5; /* Continuation after loss is suppressed. */
+  assert(rtp_decoder_decode(&decoder, packet, 26) == 0);
   rtp_encoder_init(&encoder, CODEC_PCMU, on_packet, NULL);
   uint8_t large[CONFIG_MTU] = {0};
   assert(rtp_encoder_encode(&encoder, large, sizeof(large)) < 0);

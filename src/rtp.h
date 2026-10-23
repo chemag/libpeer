@@ -80,11 +80,14 @@ struct RtpDecoder {
   int (*decode_func)(RtpDecoder* rtp_decoder, uint8_t* data, size_t size);
   void* user_data;
   uint16_t sequence_number;
+  uint16_t h264_next_sequence;
   uint32_t timestamp;
   uint16_t h264_fu_next_sequence;
   uint32_t h264_fu_timestamp;
   int h264_nalu_offset;
   uint8_t h264_fu_active;
+  uint8_t h264_sequence_initialized;
+  uint8_t h264_waiting_for_idr;
 };
 
 struct RtpEncoder {

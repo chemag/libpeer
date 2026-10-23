@@ -218,30 +218,57 @@ int rtp_encoder_encode(RtpEncoder* rtp_encoder, const uint8_t* buf, size_t size)
 }
 
 static const uint32_t nalu_start_4bytecode = 0x01000000;
+
+static int rtp_h264_note_loss(RtpDecoder* rtp_decoder, int* nalu_offset) {
+  *nalu_offset = 0;
+  rtp_decoder->h264_fu_active = 0;
+  rtp_decoder->h264_waiting_for_idr = 1;
+  return -1;
+}
+
+static int rtp_h264_recovery_nalu(uint8_t nalu_type) {
+  return nalu_type == 5 || nalu_type == 7 || nalu_type == 8;
+}
+
 static int rtp_decode_h264_stap_a(RtpDecoder* rtp_decoder,
                                   uint8_t* buf,
                                   size_t size,
                                   uint8_t* nalu_buf,
                                   int* nalu_offset) {
   *nalu_offset = 0;
+  if (!size) return rtp_h264_note_loss(rtp_decoder, nalu_offset);
+
   while ((size_t)*nalu_offset + 2 <= size) {
-    size_t nalu_length = (size_t)buf[*nalu_offset] << 8 | buf[*nalu_offset + 1];
+    size_t nalu_length =
+        (size_t)buf[*nalu_offset] << 8 | buf[*nalu_offset + 1];
     *nalu_offset += 2;
 
-    if (!nalu_length || nalu_length > CONFIG_MAX_NALU_SIZE - NALU_START_CODE_SIZE ||
+    if (!nalu_length ||
+        nalu_length > CONFIG_MAX_NALU_SIZE - NALU_START_CODE_SIZE ||
         (size_t)*nalu_offset + nalu_length > size) {
       LOGE("Invalid STAP-A packet: NALU length exceeds packet size");
-      return -1;
+      return rtp_h264_note_loss(rtp_decoder, nalu_offset);
     }
 
-    memcpy(nalu_buf, &nalu_start_4bytecode, NALU_START_CODE_SIZE);
-    memcpy(nalu_buf + NALU_START_CODE_SIZE, buf + *nalu_offset, nalu_length);
+    uint8_t nalu_type = buf[*nalu_offset] & 0x1f;
+    if (!rtp_decoder->h264_waiting_for_idr ||
+        rtp_h264_recovery_nalu(nalu_type)) {
+      memcpy(nalu_buf, &nalu_start_4bytecode, NALU_START_CODE_SIZE);
+      memcpy(nalu_buf + NALU_START_CODE_SIZE, buf + *nalu_offset,
+             nalu_length);
 
-    if (rtp_decoder->on_packet != NULL) {
-      rtp_decoder->on_packet(nalu_buf, NALU_START_CODE_SIZE + nalu_length, rtp_decoder->user_data);
+      if (rtp_decoder->on_packet != NULL) {
+        rtp_decoder->on_packet(nalu_buf,
+                               NALU_START_CODE_SIZE + nalu_length,
+                               rtp_decoder->user_data);
+      }
+      if (nalu_type == 5) rtp_decoder->h264_waiting_for_idr = 0;
     }
 
     *nalu_offset += nalu_length;
+  }
+  if ((size_t)*nalu_offset != size) {
+    return rtp_h264_note_loss(rtp_decoder, nalu_offset);
   }
   return 0;
 }
@@ -251,7 +278,15 @@ static int rtp_decode_h264_single(RtpDecoder* rtp_decoder,
                                   size_t size,
                                   uint8_t* nalu_buf,
                                   int* nalu_offset) {
-  if (!size || size > CONFIG_MAX_NALU_SIZE - NALU_START_CODE_SIZE) return -1;
+  if (!size || size > CONFIG_MAX_NALU_SIZE - NALU_START_CODE_SIZE) {
+    return rtp_h264_note_loss(rtp_decoder, nalu_offset);
+  }
+  uint8_t nalu_type = *buf & 0x1f;
+  if (rtp_decoder->h264_waiting_for_idr &&
+      !rtp_h264_recovery_nalu(nalu_type)) {
+    *nalu_offset = 0;
+    return 0;
+  }
   memcpy(nalu_buf, &nalu_start_4bytecode, NALU_START_CODE_SIZE);
   *nalu_offset = NALU_START_CODE_SIZE;
   memcpy(nalu_buf + *nalu_offset, buf, size);
@@ -259,7 +294,8 @@ static int rtp_decode_h264_single(RtpDecoder* rtp_decoder,
   if (rtp_decoder->on_packet != NULL) {
     rtp_decoder->on_packet(nalu_buf, *nalu_offset, rtp_decoder->user_data);
   }
-  *nalu_offset = 0;  // reset for next NALU
+  *nalu_offset = 0;
+  if (nalu_type == 5) rtp_decoder->h264_waiting_for_idr = 0;
   return 0;
 }
 
@@ -269,33 +305,41 @@ static int rtp_decode_h264_fu_a(RtpDecoder* rtp_decoder,
                                 uint8_t* nalu_buf,
                                 int* nalu_offset) {
   if (size < NALU_HEADER_SIZE + FU_HEADER_SIZE) {
-    *nalu_offset = 0;
-    rtp_decoder->h264_fu_active = 0;
-    return -1;
+    return rtp_h264_note_loss(rtp_decoder, nalu_offset);
   }
   NaluHeader* fu_indicator = (NaluHeader*)buf;
   FuHeader* fu_header = (FuHeader*)(buf + NALU_HEADER_SIZE);
-  uint8_t reconstructed_nalu_type = (fu_indicator->f << 7) |
-                                    (fu_indicator->nri << 5) |
-                                    fu_header->type;
+  uint8_t nalu_type = fu_header->type;
+  uint8_t reconstructed_nalu_type =
+      (fu_indicator->f << 7) | (fu_indicator->nri << 5) | nalu_type;
   buf += NALU_HEADER_SIZE + FU_HEADER_SIZE;
   size -= NALU_HEADER_SIZE + FU_HEADER_SIZE;
+
+  if (fu_header->s && rtp_decoder->h264_fu_active) {
+    return rtp_h264_note_loss(rtp_decoder, nalu_offset);
+  }
+  if (rtp_decoder->h264_waiting_for_idr &&
+      !rtp_h264_recovery_nalu(nalu_type)) {
+    *nalu_offset = 0;
+    rtp_decoder->h264_fu_active = 0;
+    return 0;
+  }
+  if (rtp_decoder->h264_waiting_for_idr && !fu_header->s &&
+      !rtp_decoder->h264_fu_active) {
+    return 0;
+  }
   if (!fu_header->s &&
       (!rtp_decoder->h264_fu_active ||
        rtp_decoder->sequence_number != rtp_decoder->h264_fu_next_sequence ||
        rtp_decoder->timestamp != rtp_decoder->h264_fu_timestamp)) {
-    *nalu_offset = 0;
-    rtp_decoder->h264_fu_active = 0;
-    return -1;
+    return rtp_h264_note_loss(rtp_decoder, nalu_offset);
   }
   size_t required = fu_header->s ? NALU_START_CODE_SIZE + 1
                                  : (size_t)*nalu_offset;
   if ((!fu_header->s && !*nalu_offset) ||
       required > CONFIG_MAX_NALU_SIZE ||
       size > CONFIG_MAX_NALU_SIZE - required) {
-    *nalu_offset = 0;
-    rtp_decoder->h264_fu_active = 0;
-    return -1;
+    return rtp_h264_note_loss(rtp_decoder, nalu_offset);
   }
   if (fu_header->s) {
     rtp_decoder->h264_fu_active = 1;
@@ -317,6 +361,7 @@ static int rtp_decode_h264_fu_a(RtpDecoder* rtp_decoder,
     }
     *nalu_offset = 0;
     rtp_decoder->h264_fu_active = 0;
+    if (nalu_type == 5) rtp_decoder->h264_waiting_for_idr = 0;
   }
   return 0;
 }
@@ -325,9 +370,9 @@ static int rtp_decode_h264(RtpDecoder* rtp_decoder, uint8_t* buf, size_t size) {
   static uint8_t nalu_buf[CONFIG_MAX_NALU_SIZE];
   uint8_t nalu_type = *buf & 0x1f;
 
-  if (nalu_type != FU_A) {
-    rtp_decoder->h264_fu_active = 0;
-    rtp_decoder->h264_nalu_offset = 0;
+  if (nalu_type != FU_A && rtp_decoder->h264_fu_active) {
+    return rtp_h264_note_loss(rtp_decoder,
+                              &rtp_decoder->h264_nalu_offset);
   }
   switch (nalu_type) {
     case STAP_A:
@@ -355,11 +400,14 @@ void rtp_decoder_init(RtpDecoder* rtp_decoder, MediaCodec codec, RtpOnPacket on_
   rtp_decoder->user_data = user_data;
   rtp_decoder->decode_func = NULL;
   rtp_decoder->sequence_number = 0;
+  rtp_decoder->h264_next_sequence = 0;
   rtp_decoder->timestamp = 0;
   rtp_decoder->h264_fu_next_sequence = 0;
   rtp_decoder->h264_fu_timestamp = 0;
   rtp_decoder->h264_nalu_offset = 0;
   rtp_decoder->h264_fu_active = 0;
+  rtp_decoder->h264_sequence_initialized = 0;
+  rtp_decoder->h264_waiting_for_idr = 0;
 
   switch (codec) {
     case CODEC_H264:
@@ -392,8 +440,19 @@ int rtp_decoder_decode(RtpDecoder* rtp_decoder, const uint8_t* buf, size_t size)
   }
   if (offset >= size) return -1;
   const RtpHeader* header = (const RtpHeader*)buf;
-  rtp_decoder->sequence_number = ntohs(header->seq_number);
+  uint16_t sequence = ntohs(header->seq_number);
+  rtp_decoder->sequence_number = sequence;
   rtp_decoder->timestamp = ntohl(header->timestamp);
+  if (rtp_decoder->decode_func == rtp_decode_h264) {
+    if (rtp_decoder->h264_sequence_initialized &&
+        sequence != rtp_decoder->h264_next_sequence) {
+      rtp_decoder->h264_next_sequence = sequence + 1;
+      return rtp_h264_note_loss(rtp_decoder,
+                                &rtp_decoder->h264_nalu_offset);
+    }
+    rtp_decoder->h264_sequence_initialized = 1;
+    rtp_decoder->h264_next_sequence = sequence + 1;
+  }
   return rtp_decoder->decode_func(rtp_decoder, (uint8_t*)buf + offset,
                                   size - offset);
 }
