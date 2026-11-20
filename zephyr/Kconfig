@@ -11,14 +11,14 @@ if LIBPEER
 config LIBPEER_SIGNALING
 	bool "Built-in HTTP and MQTT signaling"
 	default y
-	depends on CJSON
 	help
-	  Build peer_signaling.c with coreHTTP and coreMQTT. Disable it when
-	  the application exchanges the session descriptions itself.
+	  Build peer_signaling.c with coreHTTP and coreMQTT. It links the cjson
+	  library, which a cJSON module must provide. Disable it when the
+	  application exchanges the session descriptions itself.
 
 config LIBPEER_BUNDLED_LIBSRTP
 	bool "Build libsrtp from the third_party/libsrtp submodule"
-	default y if !LIBSRTP
+	default y
 	help
 	  Build the libsrtp sources libpeer uses from its submodule. Disable it
 	  to link against the srtp library of a separate libsrtp module.
