@@ -21,6 +21,9 @@ if(CONFIG_LIBPEER)
     zephyr_compile_definitions(CONFIG_STRICT_CHROME_PROFILE=1)
   endif()
 
+  # Keep libpeer warnings from failing builds that treat warnings as errors.
+  zephyr_library_compile_options(-Wno-error)
+
   zephyr_library_include_directories(${LIBPEER_DIR}/src)
   zephyr_include_directories(${LIBPEER_DIR}/src)
 
