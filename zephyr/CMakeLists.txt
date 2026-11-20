@@ -40,5 +40,10 @@ if(CONFIG_LIBPEER)
     zephyr_compile_definitions(DISABLE_PEER_SIGNALING=1)
   endif()
 
-  zephyr_library_link_libraries(srtp)
+  if(CONFIG_LIBPEER_BUNDLED_LIBSRTP)
+    # Switches the current Zephyr library to libpeer_srtp, so keep it last.
+    include(${CMAKE_CURRENT_LIST_DIR}/libsrtp.cmake)
+  else()
+    zephyr_library_link_libraries(srtp)
+  endif()
 endif()

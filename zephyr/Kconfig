@@ -16,6 +16,13 @@ config LIBPEER_SIGNALING
 	  Build peer_signaling.c with coreHTTP and coreMQTT. Disable it when
 	  the application exchanges the session descriptions itself.
 
+config LIBPEER_BUNDLED_LIBSRTP
+	bool "Build libsrtp from the third_party/libsrtp submodule"
+	default y if !LIBSRTP
+	help
+	  Build the libsrtp sources libpeer uses from its submodule. Disable it
+	  to link against the srtp library of a separate libsrtp module.
+
 endif # LIBPEER
 
 endmenu
