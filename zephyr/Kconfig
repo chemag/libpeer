@@ -3,8 +3,19 @@ menu "libpeer"
 config LIBPEER
 	bool "Enable libpeer module"
 	default n
-	depends on CJSON && LIBSRTP
 	help
 	  Enable libpeer integration for Zephyr builds.
+
+if LIBPEER
+
+config LIBPEER_SIGNALING
+	bool "Built-in HTTP and MQTT signaling"
+	default y
+	depends on CJSON
+	help
+	  Build peer_signaling.c with coreHTTP and coreMQTT. Disable it when
+	  the application exchanges the session descriptions itself.
+
+endif # LIBPEER
 
 endmenu
