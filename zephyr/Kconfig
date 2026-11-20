@@ -23,6 +23,31 @@ config LIBPEER_BUNDLED_LIBSRTP
 	  Build the libsrtp sources libpeer uses from its submodule. Disable it
 	  to link against the srtp library of a separate libsrtp module.
 
+config LIBPEER_DTLS_ECDSA
+	bool "Use an ECDSA certificate for DTLS"
+	help
+	  Generate an ECDSA DTLS certificate instead of an RSA one.
+
+config LIBPEER_STRICT_CHROME_PROFILE
+	bool "Constrained Chrome media profile"
+	help
+	  Build with CONFIG_STRICT_CHROME_PROFILE, the constrained PCMU and
+	  H.264 profile described in src/config.h.
+
+config LIBPEER_LOG_LEVEL
+	int "libpeer log level"
+	range 0 3
+	default 2
+	help
+	  0 for errors, 1 for warnings, 2 for information and 3 for debug
+	  messages.
+
+config LIBPEER_LOG_REDIRECT
+	bool "Send libpeer log messages to peer_log()"
+	help
+	  Pass libpeer log messages to a peer_log() function provided by the
+	  application instead of printing them to stdout.
+
 endif # LIBPEER
 
 endmenu

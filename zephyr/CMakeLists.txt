@@ -7,7 +7,19 @@ if(CONFIG_LIBPEER)
   file(GLOB LIBPEER_CORE_SRCS ${LIBPEER_DIR}/src/*.c)
   zephyr_library_sources(${LIBPEER_CORE_SRCS})
 
-  zephyr_library_compile_definitions(CONFIG_USE_USRSCTP=0)
+  zephyr_library_compile_definitions(
+    CONFIG_USE_USRSCTP=0
+    LOG_LEVEL=${CONFIG_LIBPEER_LOG_LEVEL}
+    LOG_REDIRECT=$<BOOL:${CONFIG_LIBPEER_LOG_REDIRECT}>
+  )
+  # src/config.h tests these, so applications including libpeer headers
+  # must see the same values.
+  if(CONFIG_LIBPEER_DTLS_ECDSA)
+    zephyr_compile_definitions(CONFIG_DTLS_USE_ECDSA=1)
+  endif()
+  if(CONFIG_LIBPEER_STRICT_CHROME_PROFILE)
+    zephyr_compile_definitions(CONFIG_STRICT_CHROME_PROFILE=1)
+  endif()
 
   zephyr_library_include_directories(${LIBPEER_DIR}/src)
   zephyr_include_directories(${LIBPEER_DIR}/src)
