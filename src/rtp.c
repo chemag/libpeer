@@ -48,7 +48,13 @@ uint32_t rtp_get_ssrc(uint8_t* packet) {
   return ntohl(rtp_header->ssrc);
 }
 
-static int rtp_encoder_encode_h264_single(RtpEncoder* rtp_encoder, uint8_t* buf, size_t size) {
+static void rtp_encoder_send(RtpEncoder* rtp_encoder, size_t size) {
+  rtp_encoder->packet_count++;
+  rtp_encoder->octet_count += size - sizeof(RtpHeader);
+  rtp_encoder->on_packet(rtp_encoder->buf, size, rtp_encoder->user_data);
+}
+
+static int rtp_encoder_encode_h264_single(RtpEncoder* rtp_encoder, uint8_t* buf, size_t size, int last) {
   RtpPacket* rtp_packet = (RtpPacket*)rtp_encoder->buf;
 
   rtp_header_init(&rtp_packet->header, rtp_encoder->type);
@@ -57,8 +63,10 @@ static int rtp_encoder_encode_h264_single(RtpEncoder* rtp_encoder, uint8_t* buf,
   rtp_packet->header.timestamp = htonl(rtp_encoder->timestamp);
   rtp_packet->header.ssrc = htonl(rtp_encoder->ssrc);
 
-  // I frame and P frame
-  if ((*buf & 0x1f) == 0x05 || (*buf & 0x1f) == 0x01) {
+  if (rtp_encoder->frame_timestamp) {
+    if (last) rtp_header_set_marker(&rtp_packet->header);
+  } else if ((*buf & 0x1f) == 0x05 || (*buf & 0x1f) == 0x01) {
+    // I frame and P frame
     rtp_header_set_marker(&rtp_packet->header);
     rtp_encoder->timestamp += rtp_encoder->timestamp_increment;
   }
@@ -67,11 +75,11 @@ static int rtp_encoder_encode_h264_single(RtpEncoder* rtp_encoder, uint8_t* buf,
 #endif
 
   memcpy(rtp_packet->payload, buf, size);
-  rtp_encoder->on_packet(rtp_encoder->buf, size + sizeof(RtpHeader), rtp_encoder->user_data);
+  rtp_encoder_send(rtp_encoder, size + sizeof(RtpHeader));
   return 0;
 }
 
-static int rtp_encoder_encode_h264_fu_a(RtpEncoder* rtp_encoder, uint8_t* buf, size_t size) {
+static int rtp_encoder_encode_h264_fu_a(RtpEncoder* rtp_encoder, uint8_t* buf, size_t size, int last) {
   RtpPacket* rtp_packet = (RtpPacket*)rtp_encoder->buf;
 
   rtp_header_init(&rtp_packet->header, rtp_encoder->type);
@@ -83,7 +91,7 @@ static int rtp_encoder_encode_h264_fu_a(RtpEncoder* rtp_encoder, uint8_t* buf, s
   size = size - 1;
 
   // increase timestamp if I, P frame
-  if (type == 0x05 || type == 0x01) {
+  if (!rtp_encoder->frame_timestamp && (type == 0x05 || type == 0x01)) {
     rtp_encoder->timestamp += rtp_encoder->timestamp_increment;
   }
 
@@ -102,16 +110,16 @@ static int rtp_encoder_encode_h264_fu_a(RtpEncoder* rtp_encoder, uint8_t* buf, s
 
     if (size <= FU_PAYLOAD_SIZE) {
       fu_header->e = 1;
-      rtp_header_set_marker(&rtp_packet->header);
+      if (last) rtp_header_set_marker(&rtp_packet->header);
       memcpy(rtp_packet->payload + sizeof(NaluHeader) + sizeof(FuHeader), buf, size);
-      rtp_encoder->on_packet(rtp_encoder->buf, size + sizeof(RtpHeader) + sizeof(NaluHeader) + sizeof(FuHeader), rtp_encoder->user_data);
+      rtp_encoder_send(rtp_encoder, size + sizeof(RtpHeader) + sizeof(NaluHeader) + sizeof(FuHeader));
       break;
     }
 
     fu_header->e = 0;
 
     memcpy(rtp_packet->payload + sizeof(NaluHeader) + sizeof(FuHeader), buf, FU_PAYLOAD_SIZE);
-    rtp_encoder->on_packet(rtp_encoder->buf, CONFIG_MTU, rtp_encoder->user_data);
+    rtp_encoder_send(rtp_encoder, CONFIG_MTU);
     size -= FU_PAYLOAD_SIZE;
     buf += FU_PAYLOAD_SIZE;
 
@@ -133,29 +141,39 @@ static uint8_t* h264_find_nalu(uint8_t* buf_start, uint8_t* buf_end) {
   return buf_end;
 }
 
+static void rtp_encoder_encode_h264_nalu(RtpEncoder* rtp_encoder, uint8_t* buf, size_t size, int last) {
+  if (size <= RTP_PAYLOAD_SIZE) {
+    rtp_encoder_encode_h264_single(rtp_encoder, buf, size, last);
+  } else {
+    rtp_encoder_encode_h264_fu_a(rtp_encoder, buf, size, last);
+  }
+}
+
 static int rtp_encoder_encode_h264(RtpEncoder* rtp_encoder, uint8_t* buf, size_t size) {
   uint8_t* buf_end = buf + size;
   uint8_t *pstart, *pend;
-  size_t nalu_size;
+  uint8_t* nalu = NULL;
+  size_t nalu_size = 0;
+  size_t next_size;
 
   for (pstart = h264_find_nalu(buf, buf_end); pstart < buf_end; pstart = pend) {
     pend = h264_find_nalu(pstart, buf_end);
-    nalu_size = pend - pstart;
+    next_size = pend - pstart;
 
     if (pend != buf_end)
-      nalu_size--;
+      next_size--;
 
-    while (nalu_size && pstart[nalu_size - 1] == 0x00)
-      nalu_size--;
-    if (!nalu_size) continue;
+    while (next_size && pstart[next_size - 1] == 0x00)
+      next_size--;
+    if (!next_size) continue;
 
-    if (nalu_size <= RTP_PAYLOAD_SIZE) {
-      rtp_encoder_encode_h264_single(rtp_encoder, pstart, nalu_size);
-
-    } else {
-      rtp_encoder_encode_h264_fu_a(rtp_encoder, pstart, nalu_size);
-    }
+    /* A NAL unit is sent once the next one is found, so that the last one of
+     * an access unit is known. Without a frame timestamp each one ends a frame. */
+    if (nalu) rtp_encoder_encode_h264_nalu(rtp_encoder, nalu, nalu_size, !rtp_encoder->frame_timestamp);
+    nalu = pstart;
+    nalu_size = next_size;
   }
+  if (nalu) rtp_encoder_encode_h264_nalu(rtp_encoder, nalu, nalu_size, 1);
 
   return 0;
 }
@@ -171,7 +189,7 @@ static int rtp_encoder_encode_generic(RtpEncoder* rtp_encoder, uint8_t* buf, siz
   rtp_header->ssrc = htonl(rtp_encoder->ssrc);
   memcpy(rtp_encoder->buf + sizeof(RtpHeader), buf, size);
 
-  rtp_encoder->on_packet(rtp_encoder->buf, size + sizeof(RtpHeader), rtp_encoder->user_data);
+  rtp_encoder_send(rtp_encoder, size + sizeof(RtpHeader));
 
   return 0;
 }
@@ -181,29 +199,36 @@ void rtp_encoder_init(RtpEncoder* rtp_encoder, MediaCodec codec, RtpOnPacket on_
   rtp_encoder->user_data = user_data;
   rtp_encoder->timestamp = 0;
   rtp_encoder->seq_number = 0;
+  rtp_encoder->packet_count = 0;
+  rtp_encoder->octet_count = 0;
+  rtp_encoder->frame_timestamp = 0;
 
   switch (codec) {
     case CODEC_H264:
       rtp_encoder->type = PT_H264;
       rtp_encoder->ssrc = SSRC_H264;
+      rtp_encoder->clock_rate = 90000;
       rtp_encoder->timestamp_increment = 90000 / 30;  // 30 FPS.
       rtp_encoder->encode_func = rtp_encoder_encode_h264;
       break;
     case CODEC_PCMA:
       rtp_encoder->type = PT_PCMA;
       rtp_encoder->ssrc = SSRC_PCMA;
+      rtp_encoder->clock_rate = 8000;
       rtp_encoder->timestamp_increment = CONFIG_AUDIO_DURATION * 8000 / 1000;
       rtp_encoder->encode_func = rtp_encoder_encode_generic;
       break;
     case CODEC_PCMU:
       rtp_encoder->type = PT_PCMU;
       rtp_encoder->ssrc = SSRC_PCMU;
+      rtp_encoder->clock_rate = 8000;
       rtp_encoder->timestamp_increment = CONFIG_AUDIO_DURATION * 8000 / 1000;
       rtp_encoder->encode_func = rtp_encoder_encode_generic;
       break;
     case CODEC_OPUS:
       rtp_encoder->type = PT_OPUS;
       rtp_encoder->ssrc = SSRC_OPUS;
+      rtp_encoder->clock_rate = 48000;
       rtp_encoder->timestamp_increment = CONFIG_AUDIO_DURATION * 48000 / 1000;
       rtp_encoder->encode_func = rtp_encoder_encode_generic;
       break;
@@ -215,6 +240,19 @@ void rtp_encoder_init(RtpEncoder* rtp_encoder, MediaCodec codec, RtpOnPacket on_
 int rtp_encoder_encode(RtpEncoder* rtp_encoder, const uint8_t* buf, size_t size) {
   if (!buf || !size || !rtp_encoder->encode_func) return -1;
   return rtp_encoder->encode_func(rtp_encoder, (uint8_t*)buf, size);
+}
+
+int rtp_encoder_encode_ts(RtpEncoder* rtp_encoder, const uint8_t* buf, size_t size, uint32_t timestamp) {
+  int ret;
+
+  if (!buf || !size || !rtp_encoder->encode_func) return -1;
+  rtp_encoder->timestamp = timestamp;
+  rtp_encoder->frame_timestamp = 1;
+  ret = rtp_encoder->encode_func(rtp_encoder, (uint8_t*)buf, size);
+  rtp_encoder->frame_timestamp = 0;
+  /* Where rtp_encoder_encode() continues if the caller goes back to it. */
+  rtp_encoder->timestamp = timestamp + rtp_encoder->timestamp_increment;
+  return ret;
 }
 
 static const uint32_t nalu_start_4bytecode = 0x01000000;

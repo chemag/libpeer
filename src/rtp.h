@@ -99,6 +99,12 @@ struct RtpEncoder {
   uint32_t ssrc;
   uint32_t timestamp;
   uint32_t timestamp_increment;
+  uint32_t clock_rate;
+  /* Totals since the start of the stream, as RTCP sender reports carry them. */
+  uint32_t packet_count;
+  uint32_t octet_count;
+  /* Set while a frame is encoded with the timestamp its caller supplied. */
+  uint8_t frame_timestamp;
   uint8_t buf[CONFIG_MTU + 128];
 };
 
@@ -107,6 +113,10 @@ int rtp_packet_validate(uint8_t* packet, size_t size);
 void rtp_encoder_init(RtpEncoder* rtp_encoder, MediaCodec codec, RtpOnPacket on_packet, void* user_data);
 
 int rtp_encoder_encode(RtpEncoder* rtp_encoder, const uint8_t* data, size_t size);
+
+/* Every packet of the frame carries timestamp. For H264 the data is one access
+ * unit and only its last packet has the marker bit. */
+int rtp_encoder_encode_ts(RtpEncoder* rtp_encoder, const uint8_t* data, size_t size, uint32_t timestamp);
 
 void rtp_decoder_init(RtpDecoder* rtp_decoder, MediaCodec codec, RtpOnPacket on_packet, void* user_data);
 
