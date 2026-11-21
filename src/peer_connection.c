@@ -32,6 +32,8 @@ typedef struct PeerStream {
   int timed;
   uint32_t rtp_timestamp;
   uint64_t capture_time_us;
+  /* What was received of the remote stream of the same kind. */
+  RtcpReceiver receiver;
   /* RTCP reports are sent once the stream is active and there is a clock. */
   int reporting;
   uint64_t next_report_us;
@@ -116,6 +118,34 @@ static int peer_connection_dtls_srtp_send(void* ctx, const uint8_t* buf, size_t 
   return agent_send(&pc->agent, buf, len);
 }
 
+static void peer_connection_incoming_sender_report(PeerConnection* pc, const uint8_t* packet, size_t size) {
+  uint32_t ssrc;
+  RtcpSenderInfo sender;
+  PeerStream* stream;
+
+  if (rtcp_parse_sender_report(packet, size, &ssrc, &sender) != 0 || ssrc == 0) {
+    return;
+  }
+  /* The SSRC of a remote stream is the one of its RTP packets, or else the
+   * one its SDP announced. */
+  if (ssrc == pc->vstream.receiver.ssrc || ssrc == pc->remote_vssrc) {
+    stream = &pc->vstream;
+  } else if (ssrc == pc->astream.receiver.ssrc || ssrc == pc->remote_assrc) {
+    stream = &pc->astream;
+  } else {
+    LOGD("RTCP_SR of unknown SSRC %" PRIu32, ssrc);
+    return;
+  }
+  if (pc->config.clock_us) {
+    rtcp_receiver_on_sender_report(&stream->receiver, sender.ntp_timestamp,
+                                   pc->config.clock_us(pc->config.user_data));
+  }
+  if (pc->config.on_sender_report) {
+    pc->config.on_sender_report(stream == &pc->vstream, sender.ntp_timestamp,
+                                sender.rtp_timestamp, pc->config.user_data);
+  }
+}
+
 static void peer_connection_incoming_rtcp(PeerConnection* pc, uint8_t* buf, size_t len) {
   RtcpHeader* rtcp_header;
   size_t pos = 0;
@@ -126,6 +156,9 @@ static void peer_connection_incoming_rtcp(PeerConnection* pc, uint8_t* buf, size
     if ((buf[pos] >> 6) != 2 || packet_size > len - pos) return;
 
     switch (rtcp_header->type) {
+      case RTCP_SR:
+        peer_connection_incoming_sender_report(pc, buf + pos, packet_size);
+        break;
       case RTCP_RR:
         LOGD("RTCP_PR");
         if (rtcp_header_rc(rtcp_header) > 0) {
@@ -184,6 +217,20 @@ void* peer_connection_get_sctp(PeerConnection* pc) {
   return &pc->sctp;
 }
 
+/* The decoders deliver data only: the timestamp is the one of the RTP packet
+ * being decoded. */
+static void peer_connection_incoming_audio(uint8_t* data, size_t size, void* user_data) {
+  PeerConnection* pc = (PeerConnection*)user_data;
+
+  pc->config.onaudiotrack_ts(data, size, pc->artp_decoder.timestamp, pc->config.user_data);
+}
+
+static void peer_connection_incoming_video(uint8_t* data, size_t size, void* user_data) {
+  PeerConnection* pc = (PeerConnection*)user_data;
+
+  pc->config.onvideotrack_ts(data, size, pc->vrtp_decoder.timestamp, pc->config.user_data);
+}
+
 PeerConnection* peer_connection_create(PeerConfiguration* config) {
   PeerConnection* pc = calloc(1, sizeof(PeerConnection));
   if (!pc) {
@@ -200,16 +247,26 @@ PeerConnection* peer_connection_create(PeerConfiguration* config) {
     rtp_encoder_init(&pc->artp_encoder, pc->config.audio_codec,
                      peer_connection_outgoing_rtp_packet, (void*)pc);
 
-    rtp_decoder_init(&pc->artp_decoder, pc->config.audio_codec,
-                     pc->config.onaudiotrack, pc->config.user_data);
+    if (pc->config.onaudiotrack_ts) {
+      rtp_decoder_init(&pc->artp_decoder, pc->config.audio_codec,
+                       peer_connection_incoming_audio, (void*)pc);
+    } else {
+      rtp_decoder_init(&pc->artp_decoder, pc->config.audio_codec,
+                       pc->config.onaudiotrack, pc->config.user_data);
+    }
   }
 
   if (pc->config.video_codec) {
     rtp_encoder_init(&pc->vrtp_encoder, pc->config.video_codec,
                      peer_connection_outgoing_rtp_packet, (void*)pc);
 
-    rtp_decoder_init(&pc->vrtp_decoder, pc->config.video_codec,
-                     pc->config.onvideotrack, pc->config.user_data);
+    if (pc->config.onvideotrack_ts) {
+      rtp_decoder_init(&pc->vrtp_decoder, pc->config.video_codec,
+                       peer_connection_incoming_video, (void*)pc);
+    } else {
+      rtp_decoder_init(&pc->vrtp_decoder, pc->config.video_codec,
+                       pc->config.onvideotrack, pc->config.user_data);
+    }
   }
 
   return pc;
@@ -253,18 +310,30 @@ static void peer_connection_start_reports(PeerConnection* pc, PeerStream* stream
   stream->next_report_us = pc->config.clock_us(pc->config.user_data) + RTCP_REPORT_FIRST_US;
 }
 
+/* A sender report if the stream is sent with timestamps, a receiver report
+ * otherwise, with a report block if the remote stream is received. */
 static void peer_connection_send_report(PeerConnection* pc, RtpEncoder* encoder, PeerStream* stream, uint64_t now_us) {
   uint8_t packet[128];
   RtcpSenderInfo sender;
+  RtcpReportBlock block;
+  int sending = CONFIG_RTCP_SENDER_REPORTS && stream->timed;
+  int receiving = stream->receiver.ssrc != 0;
   int bytes;
-  /* The RTP clock runs on from the last frame; a frame may also be ahead. */
-  int64_t elapsed_us = (int64_t)(now_us - stream->capture_time_us);
 
-  sender.ntp_timestamp = rtcp_ntp_timestamp(now_us);
-  sender.rtp_timestamp = stream->rtp_timestamp + (uint32_t)(elapsed_us * (int64_t)encoder->clock_rate / 1000000);
-  sender.packet_count = encoder->packet_count;
-  sender.octet_count = encoder->octet_count;
-  bytes = rtcp_get_sender_report(packet, sizeof(packet), encoder->ssrc, &sender, CONFIG_RTCP_CNAME);
+  if (sending) {
+    /* The RTP clock runs on from the last frame; a frame may also be ahead. */
+    int64_t elapsed_us = (int64_t)(now_us - stream->capture_time_us);
+
+    sender.ntp_timestamp = rtcp_ntp_timestamp(now_us);
+    sender.rtp_timestamp = stream->rtp_timestamp + (uint32_t)(elapsed_us * (int64_t)encoder->clock_rate / 1000000);
+    sender.packet_count = encoder->packet_count;
+    sender.octet_count = encoder->octet_count;
+  }
+  if (receiving) {
+    rtcp_receiver_get_report_block(&stream->receiver, now_us, &block);
+  }
+  bytes = rtcp_get_report(packet, sizeof(packet), encoder->ssrc, sending ? &sender : NULL,
+                          receiving ? &block : NULL, CONFIG_RTCP_CNAME);
   if (bytes < 0 ||
       dtls_srtp_encrypt_rtcp_packet(&pc->dtls_srtp, packet, &bytes) != 0 ||
       agent_send(&pc->agent, packet, bytes) != bytes) {
@@ -385,7 +454,15 @@ static char* peer_connection_dtls_role_setup_value(DtlsSrtpRole d) {
 static void peer_connection_decode_rtp(PeerConnection* pc,
                                        RtpDecoder* decoder,
                                        int video) {
-  int result = rtp_decoder_decode(decoder, pc->agent_buf, pc->agent_ret);
+  const RtpHeader* header = (const RtpHeader*)pc->agent_buf;
+  PeerStream* stream = video ? &pc->vstream : &pc->astream;
+  int result;
+
+  if (decoder->decode_func) {
+    rtcp_receiver_on_packet(&stream->receiver, ntohl(header->ssrc), ntohs(header->seq_number));
+    peer_connection_start_reports(pc, stream);
+  }
+  result = rtp_decoder_decode(decoder, pc->agent_buf, pc->agent_ret);
 
   if (result < 0) {
     LOGW("RTP depacketization failed for %s", video ? "video" : "audio");

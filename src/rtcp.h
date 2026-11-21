@@ -81,14 +81,41 @@ typedef struct RtcpSenderInfo {
   uint32_t octet_count;
 } RtcpSenderInfo;
 
+/* Reception statistics of one remote SSRC, the source of its report blocks. */
+typedef struct RtcpReceiver {
+  uint32_t ssrc; /* 0 until the first RTP packet */
+  uint32_t received;
+  uint32_t expected_prior; /* expected and received at the previous report */
+  uint32_t received_prior;
+  uint32_t cycles; /* sequence number wraps, shifted left by 16 */
+  uint16_t base_seq;
+  uint16_t max_seq;
+  uint32_t last_sr;         /* middle 32 bits of the NTP timestamp of the last SR */
+  uint64_t last_sr_time_us; /* its arrival, on the clock of the application */
+} RtcpReceiver;
+
 int rtcp_probe(uint8_t* packet, size_t size);
 
 /* Microseconds to the 32.32 fixed point format of NTP timestamps. */
 uint64_t rtcp_ntp_timestamp(uint64_t time_us);
 
-/* Write the compound packet SR + SDES(CNAME) and return its length. */
-int rtcp_get_sender_report(uint8_t* packet, int len, uint32_t ssrc,
-                           const RtcpSenderInfo* sender, const char* cname);
+/* Write the compound packet SR + SDES(CNAME), or RR + SDES(CNAME) without
+ * sender information, and return its length. The optional report block is in
+ * host byte order. */
+int rtcp_get_report(uint8_t* packet, int len, uint32_t ssrc,
+                    const RtcpSenderInfo* sender, const RtcpReportBlock* block,
+                    const char* cname);
+
+/* Read the SSRC and the sender information of an SR packet. */
+int rtcp_parse_sender_report(const uint8_t* packet, size_t size, uint32_t* ssrc,
+                             RtcpSenderInfo* sender);
+
+void rtcp_receiver_on_packet(RtcpReceiver* receiver, uint32_t ssrc, uint16_t seq);
+
+void rtcp_receiver_on_sender_report(RtcpReceiver* receiver, uint64_t ntp_timestamp, uint64_t now_us);
+
+/* Fill the report block of the interval since the previous call, in host byte order. */
+void rtcp_receiver_get_report_block(RtcpReceiver* receiver, uint64_t now_us, RtcpReportBlock* block);
 
 int rtcp_get_pli(uint8_t* packet, int len, uint32_t sender_ssrc,
                  uint32_t media_ssrc);
