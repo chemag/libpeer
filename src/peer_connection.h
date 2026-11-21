@@ -82,8 +82,19 @@ typedef struct PeerConfiguration {
    * capture_time_us of peer_connection_send_audio_ts() and
    * peer_connection_send_video_ts(). When it is set, a stream sent with these
    * functions also sends RTCP sender reports, which tell the remote peer how
-   * its RTP timestamps relate to that clock and so to the other stream. */
+   * its RTP timestamps relate to that clock and so to the other stream, and
+   * a stream that is received sends reception reports. */
   uint64_t (*clock_us)(void* user_data);
+
+  /* Optional. When set, they are called in place of onaudiotrack and
+   * onvideotrack, with the RTP timestamp of the packet the data came in. The
+   * NAL units of one video frame have the same timestamp. */
+  void (*onaudiotrack_ts)(uint8_t* data, size_t size, uint32_t rtp_timestamp, void* userdata);
+  void (*onvideotrack_ts)(uint8_t* data, size_t size, uint32_t rtp_timestamp, void* userdata);
+  /* Optional. Called for each RTCP sender report of the remote audio (video is
+   * 0) or video stream: rtp_timestamp is the instant ntp_timestamp, in 32.32
+   * NTP format, on the RTP clock of that stream. */
+  void (*on_sender_report)(int video, uint64_t ntp_timestamp, uint32_t rtp_timestamp, void* userdata);
 
 } PeerConfiguration;
 

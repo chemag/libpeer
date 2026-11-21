@@ -42,7 +42,8 @@ config LIBPEER_RTCP_SENDER_REPORTS
 	  application sends with peer_connection_send_audio_ts() or
 	  peer_connection_send_video_ts(), provided it sets the clock_us
 	  callback of the PeerConfiguration. The remote peer needs the
-	  reports to play the audio and the video in sync.
+	  reports to play the audio and the video in sync. Without the
+	  option the reception reports are still sent, in receiver reports.
 
 config LIBPEER_LOG_LEVEL
 	int "libpeer log level"
