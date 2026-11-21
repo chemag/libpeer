@@ -58,7 +58,7 @@ void agent_destroy(Agent* agent) {
 #endif
 }
 
-static int agent_socket_recv(Agent* agent, Address* addr, uint8_t* buf, int len) {
+static int agent_socket_recv(Agent* agent, Address* addr, uint8_t* buf, int len, int timeout_ms) {
   int ret = -1;
   int i = 0;
   int maxfd = -1;
@@ -71,8 +71,8 @@ static int agent_socket_recv(Agent* agent, Address* addr, uint8_t* buf, int len)
 #endif
   };
 
-  tv.tv_sec = 0;
-  tv.tv_usec = AGENT_POLL_TIMEOUT * 1000;
+  tv.tv_sec = timeout_ms / 1000;
+  tv.tv_usec = (timeout_ms % 1000) * 1000;
   FD_ZERO(&rfds);
 
   for (i = 0; i < sizeof(addr_type) / sizeof(addr_type[0]); i++) {
@@ -94,7 +94,6 @@ static int agent_socket_recv(Agent* agent, Address* addr, uint8_t* buf, int len)
   } else {
     for (i = 0; i < 2; i++) {
       if (FD_ISSET(agent->udp_sockets[i].fd, &rfds)) {
-        memset(buf, 0, len);
         ret = udp_socket_recvfrom(&agent->udp_sockets[i], addr, buf, len);
         break;
       }
@@ -107,8 +106,10 @@ static int agent_socket_recv(Agent* agent, Address* addr, uint8_t* buf, int len)
 static int agent_socket_recv_attempts(Agent* agent, Address* addr, uint8_t* buf, int len, int maxtimes) {
   int ret = -1;
   int i = 0;
+  /* The callers parse a STUN message: the bytes after it stay zero. */
+  memset(buf, 0, len);
   for (i = 0; i < maxtimes; i++) {
-    if ((ret = agent_socket_recv(agent, addr, buf, len)) != 0) {
+    if ((ret = agent_socket_recv(agent, addr, buf, len, AGENT_POLL_TIMEOUT)) != 0) {
       break;
     }
   }
@@ -440,10 +441,14 @@ void agent_process_stun_response(Agent* agent, StunMessage* stun_msg) {
 }
 
 int agent_recv(Agent* agent, uint8_t* buf, int len) {
+  return agent_recv_timeout(agent, buf, len, AGENT_POLL_TIMEOUT);
+}
+
+int agent_recv_timeout(Agent* agent, uint8_t* buf, int len, int timeout_ms) {
   int ret = -1;
   StunMessage stun_msg;
   Address addr;
-  if ((ret = agent_socket_recv(agent, &addr, buf, len)) > 0 && stun_probe(buf, ret) == 0) {
+  if ((ret = agent_socket_recv(agent, &addr, buf, len, timeout_ms)) > 0 && stun_probe(buf, ret) == 0) {
     if (!agent_stun_packet_fits(buf, ret)) return 0;
     memset(&stun_msg, 0, sizeof(stun_msg));
     memcpy(stun_msg.buf, buf, ret);
