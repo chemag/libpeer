@@ -75,6 +75,11 @@
 #error "CONFIG_STUN_KEEPALIVE_TIMEOUT must be greater than CONFIG_STUN_KEEPALIVE_INTERVAL"
 #endif
 
+#ifndef CONFIG_RTCP_CNAME
+/* One name for every SSRC, in the SDP and in RTCP: the streams share a clock. */
+#define CONFIG_RTCP_CNAME "libpeer"
+#endif
+
 #ifndef CONFIG_AUDIO_DURATION
 #define CONFIG_AUDIO_DURATION 20
 #endif
