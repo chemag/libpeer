@@ -34,6 +34,16 @@ config LIBPEER_STRICT_CHROME_PROFILE
 	  Build with CONFIG_STRICT_CHROME_PROFILE, the constrained PCMU and
 	  H.264 profile described in src/config.h.
 
+config LIBPEER_RTCP_SENDER_REPORTS
+	bool "Send RTCP sender reports"
+	default y
+	help
+	  Send an RTCP sender report every second for each stream the
+	  application sends with peer_connection_send_audio_ts() or
+	  peer_connection_send_video_ts(), provided it sets the clock_us
+	  callback of the PeerConfiguration. The remote peer needs the
+	  reports to play the audio and the video in sync.
+
 config LIBPEER_LOG_LEVEL
 	int "libpeer log level"
 	range 0 3

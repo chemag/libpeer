@@ -73,7 +73,22 @@ typedef struct RtcpFb {
 
 } RtcpFb;
 
+/* Sender information of a sender report, in host byte order. */
+typedef struct RtcpSenderInfo {
+  uint64_t ntp_timestamp; /* 32.32 fixed point seconds */
+  uint32_t rtp_timestamp; /* the same instant on the RTP clock of the stream */
+  uint32_t packet_count;
+  uint32_t octet_count;
+} RtcpSenderInfo;
+
 int rtcp_probe(uint8_t* packet, size_t size);
+
+/* Microseconds to the 32.32 fixed point format of NTP timestamps. */
+uint64_t rtcp_ntp_timestamp(uint64_t time_us);
+
+/* Write the compound packet SR + SDES(CNAME) and return its length. */
+int rtcp_get_sender_report(uint8_t* packet, int len, uint32_t ssrc,
+                           const RtcpSenderInfo* sender, const char* cname);
 
 int rtcp_get_pli(uint8_t* packet, int len, uint32_t sender_ssrc,
                  uint32_t media_ssrc);

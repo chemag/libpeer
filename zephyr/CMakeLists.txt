@@ -11,6 +11,7 @@ if(CONFIG_LIBPEER)
     CONFIG_USE_USRSCTP=0
     LOG_LEVEL=${CONFIG_LIBPEER_LOG_LEVEL}
     LOG_REDIRECT=$<BOOL:${CONFIG_LIBPEER_LOG_REDIRECT}>
+    CONFIG_RTCP_SENDER_REPORTS=$<BOOL:${CONFIG_LIBPEER_RTCP_SENDER_REPORTS}>
   )
   # src/config.h tests these, so applications including libpeer headers
   # must see the same values.

@@ -23,11 +23,18 @@
     }                                                                  \
   } while (0)
 
-/* Last frame peer_connection_send_*_ts() sent on one stream. */
+/* First RTCP report of a stream after its first packet, then the period. */
+#define RTCP_REPORT_FIRST_US 100000U
+#define RTCP_REPORT_INTERVAL_US 1000000U
+
 typedef struct PeerStream {
+  /* Last frame peer_connection_send_*_ts() sent on the stream. */
   int timed;
   uint32_t rtp_timestamp;
   uint64_t capture_time_us;
+  /* RTCP reports are sent once the stream is active and there is a clock. */
+  int reporting;
+  uint64_t next_report_us;
 } PeerStream;
 
 struct PeerConnection {
@@ -238,9 +245,56 @@ int peer_connection_send_video(PeerConnection* pc, const uint8_t* buf, size_t le
   return rtp_encoder_encode(&pc->vrtp_encoder, buf, len);
 }
 
+static void peer_connection_start_reports(PeerConnection* pc, PeerStream* stream) {
+  if (stream->reporting || !pc->config.clock_us) {
+    return;
+  }
+  stream->reporting = 1;
+  stream->next_report_us = pc->config.clock_us(pc->config.user_data) + RTCP_REPORT_FIRST_US;
+}
+
+static void peer_connection_send_report(PeerConnection* pc, RtpEncoder* encoder, PeerStream* stream, uint64_t now_us) {
+  uint8_t packet[128];
+  RtcpSenderInfo sender;
+  int bytes;
+  /* The RTP clock runs on from the last frame; a frame may also be ahead. */
+  int64_t elapsed_us = (int64_t)(now_us - stream->capture_time_us);
+
+  sender.ntp_timestamp = rtcp_ntp_timestamp(now_us);
+  sender.rtp_timestamp = stream->rtp_timestamp + (uint32_t)(elapsed_us * (int64_t)encoder->clock_rate / 1000000);
+  sender.packet_count = encoder->packet_count;
+  sender.octet_count = encoder->octet_count;
+  bytes = rtcp_get_sender_report(packet, sizeof(packet), encoder->ssrc, &sender, CONFIG_RTCP_CNAME);
+  if (bytes < 0 ||
+      dtls_srtp_encrypt_rtcp_packet(&pc->dtls_srtp, packet, &bytes) != 0 ||
+      agent_send(&pc->agent, packet, bytes) != bytes) {
+    LOGW("Failed to send the RTCP report of SSRC %" PRIu32, encoder->ssrc);
+  }
+}
+
+static void peer_connection_send_reports(PeerConnection* pc) {
+  RtpEncoder* encoders[] = {&pc->artp_encoder, &pc->vrtp_encoder};
+  PeerStream* streams[] = {&pc->astream, &pc->vstream};
+  uint64_t now_us;
+
+  if (!pc->astream.reporting && !pc->vstream.reporting) {
+    return;
+  }
+  now_us = pc->config.clock_us(pc->config.user_data);
+  for (int i = 0; i < 2; i++) {
+    if (streams[i]->reporting && now_us >= streams[i]->next_report_us) {
+      peer_connection_send_report(pc, encoders[i], streams[i], now_us);
+      streams[i]->next_report_us = now_us + RTCP_REPORT_INTERVAL_US;
+    }
+  }
+}
+
 static int peer_connection_send_ts(PeerConnection* pc, RtpEncoder* encoder, PeerStream* stream, const uint8_t* buf, size_t len, uint32_t rtp_timestamp, uint64_t capture_time_us) {
   if (pc->state != PEER_CONNECTION_CONNECTED) {
     return -1;
+  }
+  if (CONFIG_RTCP_SENDER_REPORTS) {
+    peer_connection_start_reports(pc, stream);
   }
   stream->timed = 1;
   stream->rtp_timestamp = rtp_timestamp;
@@ -417,6 +471,8 @@ int peer_connection_loop(PeerConnection* pc) {
           LOGW("Unknown data");
         }
       }
+
+      peer_connection_send_reports(pc);
 
 #if CONFIG_STUN_KEEPALIVE_INTERVAL > 0
       {

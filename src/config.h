@@ -80,6 +80,10 @@
 #define CONFIG_RTCP_CNAME "libpeer"
 #endif
 
+#ifndef CONFIG_RTCP_SENDER_REPORTS
+#define CONFIG_RTCP_SENDER_REPORTS 1
+#endif
+
 #ifndef CONFIG_AUDIO_DURATION
 #define CONFIG_AUDIO_DURATION 20
 #endif

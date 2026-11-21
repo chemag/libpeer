@@ -78,6 +78,13 @@ typedef struct PeerConfiguration {
   void (*on_request_keyframe)(void* userdata);
   void* user_data;
 
+  /* Optional. Current time in microseconds on the clock that gives the
+   * capture_time_us of peer_connection_send_audio_ts() and
+   * peer_connection_send_video_ts(). When it is set, a stream sent with these
+   * functions also sends RTCP sender reports, which tell the remote peer how
+   * its RTP timestamps relate to that clock and so to the other stream. */
+  uint64_t (*clock_us)(void* user_data);
+
 } PeerConfiguration;
 
 typedef struct PeerConnection PeerConnection;
@@ -123,7 +130,8 @@ int peer_connection_send_video(PeerConnection* pc, const uint8_t* packet, size_t
  * @param[in] capture time of the frame in microseconds, on the clock of the application
  *
  * peer_connection_send_audio() counts the RTP timestamp from the number of
- * frames instead. Use one of the two functions for the whole stream.
+ * frames instead. Use one of the two functions for the whole stream, and take
+ * the audio and the video capture times from the same clock.
  */
 int peer_connection_send_audio_ts(PeerConnection* pc, const uint8_t* buf, size_t len, uint32_t rtp_timestamp, uint64_t capture_time_us);
 
