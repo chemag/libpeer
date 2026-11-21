@@ -75,6 +75,9 @@ int agent_send(Agent* agent, const uint8_t* buf, int len);
 
 int agent_recv(Agent* agent, uint8_t* buf, int len);
 
+/* agent_recv() waits 1 ms for a datagram, this one up to timeout_ms. */
+int agent_recv_timeout(Agent* agent, uint8_t* buf, int len, int timeout_ms);
+
 int agent_add_remote_candidate(Agent* agent, char* description, char* end, int deduplicate);
 
 void agent_set_remote_description(Agent* agent, char* description);

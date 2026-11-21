@@ -112,7 +112,29 @@ void peer_connection_destroy(PeerConnection* pc);
 
 void peer_connection_close(PeerConnection* pc);
 
+/**
+ * @brief run the connection: connectivity checks, handshake, then reception
+ * @param[in] peer connection
+ *
+ * Once connected it waits up to 1 ms for a datagram, handles the ones that
+ * are already received, up to 32 of them, and sends the periodic RTCP reports.
+ * The receive callbacks are called from here.
+ */
 int peer_connection_loop(PeerConnection* pc);
+
+/**
+ * @brief peer_connection_loop() with the wait of the caller
+ * @param[in] peer connection
+ * @param[in] longest wait for the first datagram in milliseconds, below 1000;
+ *            0 only handles what is already received
+ * @return number of datagrams handled
+ *
+ * The caller can block here in place of sleeping between two calls. The wait
+ * also bounds the delay of what the caller sends and of the RTCP reports. In a
+ * state without reception, such as new or closed, the call sleeps for the
+ * timeout. The connectivity checks and the handshake keep their own waits.
+ */
+int peer_connection_loop_wait(PeerConnection* pc, int timeout_ms);
 
 int peer_connection_create_datachannel(PeerConnection* pc, DecpChannelType channel_type, uint16_t priority, uint32_t reliability_parameter, char* label, char* protocol);
 

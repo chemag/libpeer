@@ -23,6 +23,11 @@
     }                                                                  \
   } while (0)
 
+/* Wait of peer_connection_loop() for a datagram, in milliseconds. */
+#define PEER_CONNECTION_LOOP_TIMEOUT 1
+/* Datagrams one call of the loop handles at most. */
+#define PEER_CONNECTION_LOOP_DATAGRAMS 32
+
 /* First RTCP report of a stream after its first packet, then the period. */
 #define RTCP_REPORT_FIRST_US 100000U
 #define RTCP_REPORT_INTERVAL_US 1000000U
@@ -472,9 +477,58 @@ static void peer_connection_decode_rtp(PeerConnection* pc,
   }
 }
 
-int peer_connection_loop(PeerConnection* pc) {
-  uint32_t ssrc = 0;
-  memset(pc->agent_buf, 0, sizeof(pc->agent_buf));
+/* Handle the datagram of pc->agent_ret bytes in pc->agent_buf. */
+static void peer_connection_incoming_datagram(PeerConnection* pc) {
+  LOGD("agent_recv %d", pc->agent_ret);
+
+  if (rtcp_probe(pc->agent_buf, pc->agent_ret)) {
+    LOGD("Got RTCP packet");
+    if (dtls_srtp_decrypt_rtcp_packet(&pc->dtls_srtp, pc->agent_buf, &pc->agent_ret) == 0 && pc->agent_ret > 0) {
+      peer_connection_incoming_rtcp(pc, pc->agent_buf, pc->agent_ret);
+    }
+
+  } else if (dtls_srtp_probe(pc->agent_buf)) {
+    int ret = dtls_srtp_read(&pc->dtls_srtp, pc->temp_buf, sizeof(pc->temp_buf));
+    LOGD("Got DTLS data %d", ret);
+
+    if (ret > 0) {
+      sctp_incoming_data(&pc->sctp, (char*)pc->temp_buf, ret);
+    }
+
+  } else if (rtp_packet_validate(pc->agent_buf, pc->agent_ret)) {
+    LOGD("Got RTP packet");
+
+    if (dtls_srtp_decrypt_rtp_packet(&pc->dtls_srtp, pc->agent_buf, &pc->agent_ret) != 0 ||
+        pc->agent_ret < 12) return;
+
+    uint32_t ssrc = rtp_get_ssrc(pc->agent_buf);
+    uint8_t pt = pc->agent_buf[1] & 0x7f;
+    if (pc->remote_media_count > 0) {
+      /* Demux only the negotiated primary PTs, never RTX or another codec. */
+      for (int i = 0; i < pc->remote_media_count; i++) {
+        if (pt == pc->remote_media[i].payload_type) {
+          RtpDecoder* decoder = pc->remote_media[i].video ? &pc->vrtp_decoder : &pc->artp_decoder;
+          peer_connection_decode_rtp(pc, decoder,
+                                     pc->remote_media[i].video);
+          break;
+        }
+      }
+    } else if (ssrc == pc->remote_assrc) {
+      peer_connection_decode_rtp(pc, &pc->artp_decoder, 0);
+    } else if (ssrc == pc->remote_vssrc) {
+      peer_connection_decode_rtp(pc, &pc->vrtp_decoder, 1);
+    }
+
+  } else {
+    LOGW("Unknown data");
+  }
+}
+
+/* One step of the connection. When connected, wait up to timeout_ms for a
+ * datagram, then handle the ones that are already there. */
+static int peer_connection_step(PeerConnection* pc, int timeout_ms) {
+  int count = 0;
+
   pc->agent_ret = -1;
   switch (pc->state) {
     case PEER_CONNECTION_NEW:
@@ -503,50 +557,14 @@ int peer_connection_loop(PeerConnection* pc) {
       }
       break;
     case PEER_CONNECTION_CONNECTED:
-      if ((pc->agent_ret = agent_recv(&pc->agent, pc->agent_buf, sizeof(pc->agent_buf))) > 0) {
-        LOGD("agent_recv %d", pc->agent_ret);
-
-        if (rtcp_probe(pc->agent_buf, pc->agent_ret)) {
-          LOGD("Got RTCP packet");
-          if (dtls_srtp_decrypt_rtcp_packet(&pc->dtls_srtp, pc->agent_buf, &pc->agent_ret) == 0 && pc->agent_ret > 0) {
-            peer_connection_incoming_rtcp(pc, pc->agent_buf, pc->agent_ret);
-          }
-
-        } else if (dtls_srtp_probe(pc->agent_buf)) {
-          int ret = dtls_srtp_read(&pc->dtls_srtp, pc->temp_buf, sizeof(pc->temp_buf));
-          LOGD("Got DTLS data %d", ret);
-
-          if (ret > 0) {
-            sctp_incoming_data(&pc->sctp, (char*)pc->temp_buf, ret);
-          }
-
-        } else if (rtp_packet_validate(pc->agent_buf, pc->agent_ret)) {
-          LOGD("Got RTP packet");
-
-          if (dtls_srtp_decrypt_rtp_packet(&pc->dtls_srtp, pc->agent_buf, &pc->agent_ret) != 0 ||
-              pc->agent_ret < 12) break;
-
-          ssrc = rtp_get_ssrc(pc->agent_buf);
-          uint8_t pt = pc->agent_buf[1] & 0x7f;
-          if (pc->remote_media_count > 0) {
-            /* Demux only the negotiated primary PTs, never RTX or another codec. */
-            for (int i = 0; i < pc->remote_media_count; i++) {
-              if (pt == pc->remote_media[i].payload_type) {
-                RtpDecoder* decoder = pc->remote_media[i].video ? &pc->vrtp_decoder : &pc->artp_decoder;
-                peer_connection_decode_rtp(pc, decoder,
-                                           pc->remote_media[i].video);
-                break;
-              }
-            }
-          } else if (ssrc == pc->remote_assrc) {
-            peer_connection_decode_rtp(pc, &pc->artp_decoder, 0);
-          } else if (ssrc == pc->remote_vssrc) {
-            peer_connection_decode_rtp(pc, &pc->vrtp_decoder, 1);
-          }
-
-        } else {
-          LOGW("Unknown data");
-        }
+      /* A burst, such as the packets of a key frame, is handled in one call.
+       * The bound lets the caller send between two long bursts. */
+      while (count < PEER_CONNECTION_LOOP_DATAGRAMS && pc->state == PEER_CONNECTION_CONNECTED) {
+        pc->agent_ret = agent_recv_timeout(&pc->agent, pc->agent_buf, sizeof(pc->agent_buf),
+                                           count == 0 && timeout_ms > 0 ? timeout_ms : 0);
+        if (pc->agent_ret <= 0) break;
+        peer_connection_incoming_datagram(pc);
+        count++;
       }
 
       peer_connection_send_reports(pc);
@@ -582,7 +600,21 @@ int peer_connection_loop(PeerConnection* pc) {
       break;
   }
 
+  return count;
+}
+
+int peer_connection_loop(PeerConnection* pc) {
+  peer_connection_step(pc, PEER_CONNECTION_LOOP_TIMEOUT);
   return 0;
+}
+
+int peer_connection_loop_wait(PeerConnection* pc, int timeout_ms) {
+  if (pc->state != PEER_CONNECTION_CHECKING && pc->state != PEER_CONNECTION_CONNECTED) {
+    /* Nothing is received in the other states: only pace the caller. */
+    if (timeout_ms > 0) ports_sleep_ms(timeout_ms);
+    return 0;
+  }
+  return peer_connection_step(pc, timeout_ms);
 }
 
 /* Answers must choose one active/passive DTLS role for our single transport.
