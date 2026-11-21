@@ -23,6 +23,13 @@
     }                                                                  \
   } while (0)
 
+/* Last frame peer_connection_send_*_ts() sent on one stream. */
+typedef struct PeerStream {
+  int timed;
+  uint32_t rtp_timestamp;
+  uint64_t capture_time_us;
+} PeerStream;
+
 struct PeerConnection {
   PeerConfiguration config;
   PeerConnectionState state;
@@ -49,6 +56,8 @@ struct PeerConnection {
   RtpEncoder vrtp_encoder;
   RtpDecoder vrtp_decoder;
   RtpDecoder artp_decoder;
+  PeerStream astream;
+  PeerStream vstream;
 
   uint32_t remote_assrc;
   uint32_t remote_vssrc;
@@ -227,6 +236,24 @@ int peer_connection_send_video(PeerConnection* pc, const uint8_t* buf, size_t le
     return -1;
   }
   return rtp_encoder_encode(&pc->vrtp_encoder, buf, len);
+}
+
+static int peer_connection_send_ts(PeerConnection* pc, RtpEncoder* encoder, PeerStream* stream, const uint8_t* buf, size_t len, uint32_t rtp_timestamp, uint64_t capture_time_us) {
+  if (pc->state != PEER_CONNECTION_CONNECTED) {
+    return -1;
+  }
+  stream->timed = 1;
+  stream->rtp_timestamp = rtp_timestamp;
+  stream->capture_time_us = capture_time_us;
+  return rtp_encoder_encode_ts(encoder, buf, len, rtp_timestamp);
+}
+
+int peer_connection_send_audio_ts(PeerConnection* pc, const uint8_t* buf, size_t len, uint32_t rtp_timestamp, uint64_t capture_time_us) {
+  return peer_connection_send_ts(pc, &pc->artp_encoder, &pc->astream, buf, len, rtp_timestamp, capture_time_us);
+}
+
+int peer_connection_send_video_ts(PeerConnection* pc, const uint8_t* buf, size_t len, uint32_t rtp_timestamp, uint64_t capture_time_us) {
+  return peer_connection_send_ts(pc, &pc->vrtp_encoder, &pc->vstream, buf, len, rtp_timestamp, capture_time_us);
 }
 
 int peer_connection_datachannel_send(PeerConnection* pc, char* message, size_t len) {

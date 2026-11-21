@@ -114,6 +114,33 @@ int peer_connection_send_audio(PeerConnection* pc, const uint8_t* packet, size_t
 
 int peer_connection_send_video(PeerConnection* pc, const uint8_t* packet, size_t bytes);
 
+/**
+ * @brief send one audio frame with the RTP timestamp of the caller
+ * @param[in] peer connection
+ * @param[in] encoded frame
+ * @param[in] length of the frame
+ * @param[in] RTP timestamp of the frame, in units of the codec clock rate
+ * @param[in] capture time of the frame in microseconds, on the clock of the application
+ *
+ * peer_connection_send_audio() counts the RTP timestamp from the number of
+ * frames instead. Use one of the two functions for the whole stream.
+ */
+int peer_connection_send_audio_ts(PeerConnection* pc, const uint8_t* buf, size_t len, uint32_t rtp_timestamp, uint64_t capture_time_us);
+
+/**
+ * @brief send one video frame with the RTP timestamp of the caller
+ * @param[in] peer connection
+ * @param[in] one Annex B access unit, which may hold several NAL units
+ * @param[in] length of the access unit
+ * @param[in] RTP timestamp of the frame, in units of 1/90000 second
+ * @param[in] capture time of the frame in microseconds, on the clock of the application
+ *
+ * Every RTP packet of the access unit carries the timestamp and the last one
+ * has the marker bit. peer_connection_send_video() advances the timestamp by
+ * 1/30 second per slice instead. Use one of the two functions for the whole stream.
+ */
+int peer_connection_send_video_ts(PeerConnection* pc, const uint8_t* buf, size_t len, uint32_t rtp_timestamp, uint64_t capture_time_us);
+
 int peer_connection_request_keyframe(PeerConnection* pc);
 
 void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp, SdpType sdp_type);
