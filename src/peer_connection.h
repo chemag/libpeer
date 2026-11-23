@@ -119,6 +119,10 @@ void peer_connection_close(PeerConnection* pc);
  * Once connected it waits up to 1 ms for a datagram, handles the ones that
  * are already received, up to 32 of them, and sends the periodic RTCP reports.
  * The receive callbacks are called from here.
+ *
+ * Call it, peer_connection_loop_wait(), the peer_connection_send_*() functions
+ * and peer_connection_request_keyframe() from one thread: they share the
+ * outgoing SRTP session and the state of the streams, without a lock.
  */
 int peer_connection_loop(PeerConnection* pc);
 
