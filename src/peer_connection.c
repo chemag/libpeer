@@ -32,6 +32,16 @@
 #define RTCP_REPORT_FIRST_US 100000U
 #define RTCP_REPORT_INTERVAL_US 1000000U
 
+/* Room for an SR with one report block, the SDES packet with the CNAME, and
+ * the trailer that srtp_protect_rtcp() may append. */
+#define RTCP_CNAME_LEN (sizeof(CONFIG_RTCP_CNAME) - 1U)
+#define RTCP_REPORT_BUF_LEN                                              \
+  (8U + 20U + 24U + ((4U + 4U + 2U + RTCP_CNAME_LEN + 1U + 3U) & ~3U) + \
+   SRTP_MAX_TRAILER_LEN + 4U)
+
+_Static_assert(RTCP_CNAME_LEN > 0U && RTCP_CNAME_LEN <= 255U,
+               "CONFIG_RTCP_CNAME must have 1 to 255 characters");
+
 typedef struct PeerStream {
   /* Last frame peer_connection_send_*_ts() sent on the stream. */
   int timed;
@@ -318,7 +328,7 @@ static void peer_connection_start_reports(PeerConnection* pc, PeerStream* stream
 /* A sender report if the stream is sent with timestamps, a receiver report
  * otherwise, with a report block if the remote stream is received. */
 static void peer_connection_send_report(PeerConnection* pc, RtpEncoder* encoder, PeerStream* stream, uint64_t now_us) {
-  uint8_t packet[128];
+  uint8_t packet[RTCP_REPORT_BUF_LEN];
   RtcpSenderInfo sender;
   RtcpReportBlock block;
   int sending = CONFIG_RTCP_SENDER_REPORTS && stream->timed;
